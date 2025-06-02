@@ -12,6 +12,8 @@
   "dependencies": {
     "dotenv": "^16.5.0",
     "express": "^5.1.0",
+    "google-auth-library": "^9.15.1",
+    "google-spreadsheet": "^4.1.4",
     "ngrok": "^5.0.0-beta.2",
     "ws": "^8.18.2"
   },
