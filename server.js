@@ -93,24 +93,26 @@ wss.on('connection', (ws) => {
         console.log('Stream Twilio démarré');
         ws.streamSid = data.start.streamSid;
         
-        // Message d'accueil
-        if (openaiWs.readyState === WebSocket.OPEN) {
-          openaiWs.send(JSON.stringify({
-            type: 'conversation.item.create',
-            item: {
-              type: 'message',
-              role: 'user',
-              content: [{
-                type: 'input_text',
-                text: 'Dis bonjour et présente-toi'
-              }]
-            }
-          }));
-          
-          openaiWs.send(JSON.stringify({
-            type: 'response.create'
-          }));
-        }
+        // Délai de 2 secondes avant le message
+        setTimeout(() => {
+          if (openaiWs.readyState === WebSocket.OPEN) {
+            openaiWs.send(JSON.stringify({
+              type: 'conversation.item.create',
+              item: {
+                type: 'message',
+                role: 'user',
+                content: [{
+                  type: 'input_text',
+                  text: 'Dis bonjour en français'
+                }]
+              }
+            }));
+            
+            openaiWs.send(JSON.stringify({
+              type: 'response.create'
+            }));
+          }
+        }, 2000);
       }
       
       if (data.event === 'media') {
