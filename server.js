@@ -87,9 +87,9 @@ wss.on('connection', (ws) => {
         },
         turn_detection: {
           type: 'server_vad',
-          threshold: 0.3,
-          prefix_padding_ms: 100,
-          silence_duration_ms: 500
+          threshold: 0.2,
+          prefix_padding_ms: 50,
+          silence_duration_ms: 200
         },
         tools: [{
           type: 'function',
@@ -183,27 +183,17 @@ wss.on('connection', (ws) => {
         console.log('Stream Twilio démarré');
         ws.streamSid = data.start.streamSid;
         
-        // Délai de 1 seconde avant le message
-        setTimeout(() => {
-          if (openaiWs.readyState === WebSocket.OPEN) {
-            console.log('Envoi message d\'accueil');
-            openaiWs.send(JSON.stringify({
-              type: 'conversation.item.create',
-              item: {
-                type: 'message',
-                role: 'user',
-                content: [{
-                  type: 'input_text',
-                  text: 'Say hello and introduce yourself as a reservation assistant'
-                }]
-              }
-            }));
-            
-            openaiWs.send(JSON.stringify({
-              type: 'response.create'
-            }));
-          }
-        }, 300);
+        // Message d'accueil immédiat
+        if (openaiWs.readyState === WebSocket.OPEN) {
+          console.log('Envoi message d\'accueil immédiat');
+          openaiWs.send(JSON.stringify({
+            type: 'response.create',
+            response: {
+              modalities: ['audio'],
+              instructions: 'Say hello and introduce yourself as a restaurant reservation assistant. Be brief and welcoming.'
+            }
+          }));
+        }
       }
       
       if (data.event === 'media') {
