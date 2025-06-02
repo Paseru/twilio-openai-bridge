@@ -28,7 +28,7 @@ async function addReservation(reservationData) {
       Guests: reservationData.guests_count,
       Name: reservationData.contact_info.name,
       Phone: reservationData.contact_info.phone,
-      Email: reservationData.contact_info.email
+      Email: reservationData.contact_info.email || ''
     });
     
     console.log('Réservation ajoutée au Google Sheet');
@@ -77,52 +77,51 @@ wss.on('connection', (ws) => {
       type: 'session.update',
       session: {
         modalities: ['text', 'audio'],
-        instructions: 'ALWAYS USE YOUR FUNCTION TOOL WHEN BOOKING A RESERVATION !!!!!! You are a highly responsive, real-time vocal AI assistant specialized in handling restaurant reservations over the phone. Your default language is fluent, conversational English, but you seamlessly detect and switch to any other language spoken by the caller.\n\nYour communication style is extremely natural, fast-paced, and human-like. You maintain a friendly and helpful tone, ensuring interactions feel genuine, reassuring, and engaging. Your speech is informal yet professional, casual but polite, precisely imitating the ease and fluidity of human conversation.\n\nWhen a caller initiates a reservation:\n\n1. Greet them warmly and confirm the purpose of their call:\n   - "Good evening, thank you for calling! Would you like to book a table today?"\n\n2. Clearly identify and confirm critical reservation details (date, time, number of guests):\n   - "Great! For how many guests, please?"\n   - "Perfect, and for which date?"\n   - "Excellent, at what time would you prefer?"\n   - Always clearly confirm back: "So that\'s a table for four people tomorrow evening at 7 PM, is that right?"\n\n3. Offer alternatives if the requested time isn\'t available:\n   - "I\'m sorry, we don\'t have availability at 7 PM, but we could offer you 7:30 PM or perhaps earlier at 6:30 PM. Would either of those work for you?"\n\n4. Collect additional information when necessary:\n   - Special requests (seating preferences, dietary needs): "Do you have any special seating requests or dietary preferences we should know about?"\n   - Occasion: "Is there a special occasion you\'d like us to know about, like a birthday or anniversary?"\n\n5. Confirm contact information:\n   - "Could I have your name and contact number to finalize your reservation, please?"\n\n6. Summarize the entire reservation clearly and succinctly:\n   - "Just to recap, you have a reservation under the name John Smith for four people tomorrow evening at 7:30 PM. Everything correct?"\n\n7. Politely conclude and thank them warmly:\n   - "Fantastic, your reservation is confirmed! We\'re looking forward to welcoming you. Have a wonderful day!"\n\nThroughout the interaction, ensure:\n- Responses are immediate, minimizing any noticeable delay.\n- Tone remains reassuring and attentive, actively acknowledging all details provided by the caller.\n- If you detect a language other than English, smoothly transition to that language without interruption.\n- Maintain an engaging, conversational pace, proactively clarifying and confirming details to avoid misunderstandings.',
+        instructions: 'You MUST collect ALL required information BEFORE calling the function tool. Required: date, time, number of guests, name, phone. ONLY call make_reservation when you have ALL these details confirmed. Be conversational and natural but gather complete information first.',
         voice: 'coral',
         input_audio_format: 'g711_ulaw',
         output_audio_format: 'g711_ulaw',
         input_audio_transcription: {
-          model: 'whisper-1',
-          language: 'en'
+          model: 'whisper-1'
         },
         turn_detection: {
           type: 'server_vad',
-          threshold: 0.2,
-          prefix_padding_ms: 50,
-          silence_duration_ms: 200
+          threshold: 0.1,
+          prefix_padding_ms: 100,
+          silence_duration_ms: 300
         },
         tools: [{
           type: 'function',
           name: 'make_reservation',
-          description: 'Prendre une reservation de restaurant pour pouvoir uploader les infos sur Google Sheets.',
+          description: 'Book restaurant reservation with complete details',
           parameters: {
             type: 'object',
             properties: {
               reservation_date: {
                 type: 'string',
-                description: 'Date et heure de la réservation au format ISO 8601 (YYYY-MM-DDTHH:MM:SS).'
+                description: 'Date and time in ISO format (YYYY-MM-DDTHH:MM:SS)'
               },
               guests_count: {
                 type: 'number',
-                description: 'Nombre de personnes pour la réservation.'
+                description: 'Number of guests'
               },
               contact_info: {
                 type: 'object',
                 properties: {
                   name: {
                     type: 'string',
-                    description: 'Nom de la personne qui fait la réservation.'
+                    description: 'Customer name'
                   },
                   phone: {
                     type: 'string',
-                    description: 'Numéro de téléphone pour confirmer la réservation.'
+                    description: 'Phone number'
                   },
                   email: {
                     type: 'string',
-                    description: 'Adresse email pour recevoir la confirmation de la réservation.'
+                    description: 'Email address'
                   }
                 },
-                required: ['name', 'phone']
+                required: ['name', 'phone', 'email']
               }
             },
             required: ['reservation_date', 'guests_count', 'contact_info']
@@ -130,6 +129,25 @@ wss.on('connection', (ws) => {
         }]
       }
     }));
+    
+    // Message d'accueil automatique
+    setTimeout(() => {
+      openaiWs.send(JSON.stringify({
+        type: 'conversation.item.create',
+        item: {
+          type: 'message',
+          role: 'assistant',
+          content: [{
+            type: 'text',
+            text: 'Hello! Thank you for calling. I\'d be happy to help you make a reservation today.'
+          }]
+        }
+      }));
+      
+      openaiWs.send(JSON.stringify({
+        type: 'response.create'
+      }));
+    }, 500);
   });
 
   openaiWs.on('message', async (data) => {
@@ -137,7 +155,6 @@ wss.on('connection', (ws) => {
       const response = JSON.parse(data);
       
       if (response.type === 'response.audio.delta') {
-        // Envoyer l'audio à Twilio
         ws.send(JSON.stringify({
           event: 'media',
           streamSid: ws.streamSid,
@@ -154,7 +171,6 @@ wss.on('connection', (ws) => {
           const args = JSON.parse(response.arguments);
           const result = await addReservation(args);
           
-          // Envoyer le résultat à OpenAI
           openaiWs.send(JSON.stringify({
             type: 'conversation.item.create',
             item: {
@@ -163,11 +179,11 @@ wss.on('connection', (ws) => {
               output: JSON.stringify(result)
             }
           }));
+          
+          openaiWs.send(JSON.stringify({
+            type: 'response.create'
+          }));
         }
-      }
-      
-      if (response.type === 'session.created') {
-        console.log('Session OpenAI créée');
       }
       
     } catch (error) {
@@ -182,22 +198,9 @@ wss.on('connection', (ws) => {
       if (data.event === 'start') {
         console.log('Stream Twilio démarré');
         ws.streamSid = data.start.streamSid;
-        
-        // Message d'accueil immédiat
-        if (openaiWs.readyState === WebSocket.OPEN) {
-          console.log('Envoi message d\'accueil immédiat');
-          openaiWs.send(JSON.stringify({
-            type: 'response.create',
-            response: {
-              modalities: ['audio'],
-              instructions: 'Say hello and introduce yourself as a restaurant reservation assistant. Be brief and welcoming.'
-            }
-          }));
-        }
       }
       
       if (data.event === 'media') {
-        // Transférer l'audio à OpenAI
         if (openaiWs.readyState === WebSocket.OPEN) {
           openaiWs.send(JSON.stringify({
             type: 'input_audio_buffer.append',
