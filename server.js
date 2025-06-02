@@ -120,11 +120,10 @@ wss.on('connection', (ws) => {
                     type: 'string',
                     description: 'Email address'
                   }
-                },
-                required: ['name', 'phone', 'email']
+                }
               }
             },
-            required: ['reservation_date', 'guests_count', 'contact_info']
+            required: ['reservation_date', 'guests_count', 'customer_name', 'phone_number']
           }
         }]
       }
