@@ -66,6 +66,7 @@ wss.on('connection', (ws) => {
       const response = JSON.parse(data);
       
       if (response.type === 'response.audio.delta') {
+        console.log('Audio reçu d\'OpenAI');
         // Envoyer l'audio à Twilio
         ws.send(JSON.stringify({
           event: 'media',
@@ -78,6 +79,10 @@ wss.on('connection', (ws) => {
       
       if (response.type === 'session.created') {
         console.log('Session OpenAI créée');
+      }
+      
+      if (response.type === 'response.audio_transcript.delta') {
+        console.log('Transcription:', response.delta);
       }
       
     } catch (error) {
@@ -93,9 +98,10 @@ wss.on('connection', (ws) => {
         console.log('Stream Twilio démarré');
         ws.streamSid = data.start.streamSid;
         
-        // Délai de 2 secondes avant le message
+        // Délai de 3 secondes avant le message
         setTimeout(() => {
           if (openaiWs.readyState === WebSocket.OPEN) {
+            console.log('Envoi message d\'accueil');
             openaiWs.send(JSON.stringify({
               type: 'conversation.item.create',
               item: {
@@ -103,7 +109,7 @@ wss.on('connection', (ws) => {
                 role: 'user',
                 content: [{
                   type: 'input_text',
-                  text: 'Dis bonjour en français'
+                  text: 'Dis simplement bonjour'
                 }]
               }
             }));
@@ -112,7 +118,7 @@ wss.on('connection', (ws) => {
               type: 'response.create'
             }));
           }
-        }, 2000);
+        }, 3000);
       }
       
       if (data.event === 'media') {
