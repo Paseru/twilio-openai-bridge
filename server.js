@@ -220,11 +220,11 @@ wss.on('connection', (ws) => {
       
       // Détection de parole utilisateur pour interruption
       if (response.type === 'input_audio_buffer.speech_started') {
-        console.log('Utilisateur commence à parler - interruption');
+        console.log('Utilisateur commence à parler - HARD STOP');
         isUserSpeaking = true;
         lastInterruptTime = Date.now();
         
-        // Interrompre la génération OpenAI seulement s'il y a une réponse en cours
+        // 1. Annuler TOUTE génération OpenAI
         if (responseId) {
           openaiWs.send(JSON.stringify({
             type: 'response.cancel'
@@ -232,24 +232,40 @@ wss.on('connection', (ws) => {
           responseId = null;
         }
         
-        // Clear audio Twilio
+        // 2. Clear TOUT l'audio Twilio
         ws.send(JSON.stringify({
           event: 'clear'
         }));
         
-        // Fermer et rouvrir ElevenLabs pour vraiment couper l'audio
-        if (elevenLabsWs && elevenLabsWs.readyState === WebSocket.OPEN) {
-          elevenLabsWs.close();
-          setTimeout(() => {
-            connectElevenLabs();
-          }, 100);
+        // 3. Envoyer du silence pour forcer l'arrêt immédiat
+        for (let i = 0; i < 10; i++) {
+          ws.send(JSON.stringify({
+            event: 'media',
+            streamSid: ws.streamSid,
+            media: {
+              payload: Buffer.alloc(160).toString('base64') // Silence mulaw
+            }
+          }));
         }
+        
+        // 4. Tuer complètement ElevenLabs
+        if (elevenLabsWs) {
+          elevenLabsWs.terminate(); // Force kill
+          elevenLabsWs = null;
+        }
+        
+        // 5. Reconnecter après un délai
+        setTimeout(() => {
+          connectElevenLabs();
+          isUserSpeaking = false;
+        }, 200);
         
         textBuffer = '';
       }
       
       if (response.type === 'input_audio_buffer.speech_stopped') {
-        isUserSpeaking = false;
+        // Ne pas reset immédiatement, attendre que ElevenLabs soit reconnecté
+        console.log('Utilisateur a fini de parler');
       }
       
       // Capturer l'ID de réponse pour pouvoir l'annuler
