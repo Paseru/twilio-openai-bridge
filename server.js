@@ -2,7 +2,6 @@ const express = require('express');
 const WebSocket = require('ws');
 const { GoogleSpreadsheet } = require('google-spreadsheet');
 const { JWT } = require('google-auth-library');
-const axios = require('axios');
 const app = express();
 const port = process.env.PORT || 3000;
 
@@ -19,59 +18,7 @@ const serviceAccountAuth = new JWT({
 
 // Configuration ElevenLabs
 const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY;
-const ELEVENLABS_VOICE_ID = process.env.ELEVENLABS_VOICE_ID || 'EXAVITQu4vr4xnSDxMaL'; // Rachel par défaut
-
-// Fonction pour convertir texte en audio avec ElevenLabs
-async function textToSpeechElevenLabs(text) {
-  try {
-    const response = await axios.post(
-      `https://api.elevenlabs.io/v1/text-to-speech/${ELEVENLABS_VOICE_ID}/stream`,
-      {
-        text: text,
-        model_id: 'eleven_multilingual_v2',
-        voice_settings: {
-          stability: 0.5,
-          similarity_boost: 0.8,
-          style: 0.0,
-          use_speaker_boost: true
-        }
-      },
-      {
-        headers: {
-          'Accept': 'audio/mpeg',
-          'xi-api-key': ELEVENLABS_API_KEY,
-          'Content-Type': 'application/json'
-        },
-        responseType: 'stream'
-      }
-    );
-    
-    return response.data;
-  } catch (error) {
-    console.error('Erreur ElevenLabs:', error);
-    throw error;
-  }
-}
-
-// Fonction pour convertir MP3 en mulaw pour Twilio
-function mp3ToMulaw(mp3Stream) {
-  const ffmpeg = require('fluent-ffmpeg');
-  const { PassThrough } = require('stream');
-  const outputStream = new PassThrough();
-  
-  ffmpeg(mp3Stream)
-    .format('mulaw')
-    .audioCodec('pcm_mulaw')
-    .audioFrequency(8000)
-    .audioChannels(1)
-    .on('error', (err) => {
-      console.error('Erreur conversion:', err);
-      outputStream.destroy(err);
-    })
-    .pipe(outputStream);
-    
-  return outputStream;
-}
+const ELEVENLABS_VOICE_ID = process.env.ELEVENLABS_VOICE_ID || 'EXAVITQu4vr4xnSDxMaL';
 
 // Fonction pour ajouter une réservation
 async function addReservation(reservationData) {
@@ -118,6 +65,60 @@ const wss = new WebSocket.Server({ server });
 wss.on('connection', (ws) => {
   console.log('WebSocket Twilio connecté');
   
+  let elevenLabsWs = null;
+  let audioQueue = [];
+  let isPlaying = false;
+  
+  // Fonction pour créer une connexion ElevenLabs WebSocket
+  function connectElevenLabs() {
+    elevenLabsWs = new WebSocket('wss://api.elevenlabs.io/v1/text-to-speech/' + ELEVENLABS_VOICE_ID + '/stream-input?model_id=eleven_flash_v2&output_format=ulaw_8000', {
+      headers: {
+        'xi-api-key': ELEVENLABS_API_KEY
+      }
+    });
+    
+    elevenLabsWs.on('open', () => {
+      console.log('ElevenLabs WebSocket connecté');
+      
+      // Configuration initiale
+      elevenLabsWs.send(JSON.stringify({
+        text: " ",
+        voice_settings: {
+          stability: 0.5,
+          similarity_boost: 0.8,
+          style: 0.0,
+          use_speaker_boost: true
+        },
+        generation_config: {
+          chunk_length_schedule: [50]
+        }
+      }));
+    });
+    
+    elevenLabsWs.on('message', (data) => {
+      const response = JSON.parse(data);
+      
+      if (response.audio) {
+        // Envoyer directement à Twilio (déjà en ulaw)
+        ws.send(JSON.stringify({
+          event: 'media',
+          streamSid: ws.streamSid,
+          media: {
+            payload: response.audio
+          }
+        }));
+      }
+    });
+    
+    elevenLabsWs.on('error', (error) => {
+      console.error('Erreur ElevenLabs WebSocket:', error);
+    });
+    
+    elevenLabsWs.on('close', () => {
+      console.log('ElevenLabs WebSocket fermé');
+    });
+  }
+  
   // Connexion à OpenAI Realtime
   const openaiWs = new WebSocket('wss://api.openai.com/v1/realtime?model=gpt-4o-mini-realtime-preview', {
     headers: {
@@ -128,6 +129,9 @@ wss.on('connection', (ws) => {
 
   openaiWs.on('open', () => {
     console.log('OpenAI Realtime connecté');
+    
+    // Créer la connexion ElevenLabs
+    connectElevenLabs();
     
     // Configuration de la session - DÉSACTIVER l'audio output d'OpenAI
     openaiWs.send(JSON.stringify({
@@ -184,80 +188,51 @@ wss.on('connection', (ws) => {
       }
     }));
     
-    // Message d'accueil avec ElevenLabs
-    setTimeout(async () => {
-      const welcomeText = "Hello! Welcome to Casa Masa, thank you for calling. What brings you in today?";
-      
-      try {
-        const mp3Stream = await textToSpeechElevenLabs(welcomeText);
-        const mulawStream = mp3ToMulaw(mp3Stream);
-        
-        mulawStream.on('data', (chunk) => {
-          const base64Audio = chunk.toString('base64');
-          ws.send(JSON.stringify({
-            event: 'media',
-            streamSid: ws.streamSid,
-            media: {
-              payload: base64Audio
-            }
-          }));
-        });
-        
-        mulawStream.on('end', () => {
-          console.log('Message d\'accueil envoyé');
-        });
-        
-      } catch (error) {
-        console.error('Erreur envoi message accueil:', error);
+    // Message d'accueil avec ElevenLabs WebSocket
+    setTimeout(() => {
+      if (elevenLabsWs && elevenLabsWs.readyState === WebSocket.OPEN) {
+        elevenLabsWs.send(JSON.stringify({
+          text: "Hello! Welcome to Casa Masa, thank you for calling. What brings you in today?",
+          flush: true
+        }));
       }
-    }, 500);
+    }, 1000);
   });
 
+  let textBuffer = '';
+  
   openaiWs.on('message', async (data) => {
     try {
       const response = JSON.parse(data);
       
-      // Intercepter les réponses texte d'OpenAI
-      if (response.type === 'response.content_part.added' && 
-          response.part && response.part.type === 'text') {
-        console.log('Texte reçu d\'OpenAI:', response.part.text);
+      // Capturer le texte en streaming
+      if (response.type === 'response.text.delta' && response.delta) {
+        textBuffer += response.delta;
+        
+        // Envoyer à ElevenLabs par chunks
+        const chunks = textBuffer.match(/.{1,50}[.!?,\s]|.{1,50}$/g) || [];
+        
+        if (chunks.length > 1) {
+          const chunkToSend = chunks[0];
+          textBuffer = textBuffer.substring(chunkToSend.length);
+          
+          if (elevenLabsWs && elevenLabsWs.readyState === WebSocket.OPEN) {
+            elevenLabsWs.send(JSON.stringify({
+              text: chunkToSend,
+              flush: false
+            }));
+          }
+        }
       }
       
-      // Quand OpenAI termine sa réponse texte
-      if (response.type === 'response.done' && response.response.output) {
-        const outputItems = response.response.output;
-        
-        for (const item of outputItems) {
-          if (item.type === 'message' && item.content) {
-            for (const content of item.content) {
-              if (content.type === 'text' && content.text) {
-                console.log('Conversion ElevenLabs:', content.text);
-                
-                try {
-                  const mp3Stream = await textToSpeechElevenLabs(content.text);
-                  const mulawStream = mp3ToMulaw(mp3Stream);
-                  
-                  mulawStream.on('data', (chunk) => {
-                    const base64Audio = chunk.toString('base64');
-                    ws.send(JSON.stringify({
-                      event: 'media',
-                      streamSid: ws.streamSid,
-                      media: {
-                        payload: base64Audio
-                      }
-                    }));
-                  });
-                  
-                  mulawStream.on('error', (err) => {
-                    console.error('Erreur streaming audio:', err);
-                  });
-                  
-                } catch (error) {
-                  console.error('Erreur conversion TTS:', error);
-                }
-              }
-            }
-          }
+      // Fin de la réponse - envoyer le reste
+      if (response.type === 'response.done') {
+        if (textBuffer.trim() && elevenLabsWs && elevenLabsWs.readyState === WebSocket.OPEN) {
+          elevenLabsWs.send(JSON.stringify({
+            text: textBuffer,
+            flush: true
+          }));
+          textBuffer = '';
         }
       }
       
@@ -311,6 +286,9 @@ wss.on('connection', (ws) => {
         if (openaiWs.readyState === WebSocket.OPEN) {
           openaiWs.close();
         }
+        if (elevenLabsWs && elevenLabsWs.readyState === WebSocket.OPEN) {
+          elevenLabsWs.close();
+        }
       }
       
     } catch (error) {
@@ -322,6 +300,9 @@ wss.on('connection', (ws) => {
     console.log('WebSocket Twilio fermé');
     if (openaiWs.readyState === WebSocket.OPEN) {
       openaiWs.close();
+    }
+    if (elevenLabsWs && elevenLabsWs.readyState === WebSocket.OPEN) {
+      elevenLabsWs.close();
     }
   });
 
