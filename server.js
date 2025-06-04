@@ -66,12 +66,12 @@ wss.on('connection', (ws) => {
   console.log('WebSocket Twilio connecté');
   
   let elevenLabsWs = null;
-  let audioQueue = [];
-  let isPlaying = false;
+  let isUserSpeaking = false;
+  let lastInterruptTime = 0;
   
   // Fonction pour créer une connexion ElevenLabs WebSocket
   function connectElevenLabs() {
-    elevenLabsWs = new WebSocket('wss://api.elevenlabs.io/v1/text-to-speech/' + ELEVENLABS_VOICE_ID + '/stream-input?model_id=eleven_flash_v2&output_format=ulaw_8000', {
+    elevenLabsWs = new WebSocket('wss://api.elevenlabs.io/v1/text-to-speech/' + ELEVENLABS_VOICE_ID + '/stream-input?model_id=eleven_flash_v2&output_format=ulaw_8000&optimize_streaming_latency=4&stability=0.3', {
       headers: {
         'xi-api-key': ELEVENLABS_API_KEY
       }
@@ -80,11 +80,11 @@ wss.on('connection', (ws) => {
     elevenLabsWs.on('open', () => {
       console.log('ElevenLabs WebSocket connecté');
       
-      // Configuration initiale
+      // Configuration pour latence minimale
       elevenLabsWs.send(JSON.stringify({
         text: " ",
         voice_settings: {
-          stability: 0.5,
+          stability: 0.3,
           similarity_boost: 0.8,
           style: 0.0,
           use_speaker_boost: true
@@ -98,8 +98,8 @@ wss.on('connection', (ws) => {
     elevenLabsWs.on('message', (data) => {
       const response = JSON.parse(data);
       
-      if (response.audio) {
-        // Envoyer directement à Twilio (déjà en ulaw)
+      if (response.audio && !isUserSpeaking) {
+        // Envoyer seulement si l'utilisateur ne parle pas
         ws.send(JSON.stringify({
           event: 'media',
           streamSid: ws.streamSid,
@@ -133,21 +133,21 @@ wss.on('connection', (ws) => {
     // Créer la connexion ElevenLabs
     connectElevenLabs();
     
-    // Configuration de la session - DÉSACTIVER l'audio output d'OpenAI
+    // Configuration de la session
     openaiWs.send(JSON.stringify({
       type: 'session.update',
       session: {
-        modalities: ['text'], // Uniquement le texte en sortie
-        instructions: 'ALWAYS USE THE TOOL FUNCTION. You are the reservation assistant for Casa Masa restaurant. Start with: "Hello! Welcome to Casa Masa, thank you for calling. What brings you in today?" Then collect ALL required information BEFORE calling the function tool. Required: date, time, number of guests, name, phone, email. ONLY call make_reservation when you have ALL these details confirmed. You are a highly responsive, real-time vocal AI assistant specialized in handling restaurant reservations over the phone. Your default language is fluent, conversational English, but you seamlessly detect and switch to any other language spoken by the caller.\n\nYour communication style is extremely natural, fast-paced, and human-like. You maintain a friendly and helpful tone, ensuring interactions feel genuine, reassuring, and engaging. Your speech is informal yet professional, casual but polite, precisely imitating the ease and fluidity of human conversation.\n\nWhen a caller initiates a reservation:\n\n1. Greet them warmly and confirm the purpose of their call:\n   - "Good evening, thank you for calling! Would you like to book a table today?"\n\n2. Clearly identify and confirm critical reservation details (date, time, number of guests):\n   - "Great! For how many guests, please?"\n   - "Perfect, and for which date?"\n   - "Excellent, at what time would you prefer?"\n   - Always clearly confirm back: "So that\'s a table for four people tomorrow evening at 7 PM, is that right?"\n\n3. Offer alternatives if the requested time isn\'t available:\n   - "I\'m sorry, we don\'t have availability at 7 PM, but we could offer you 7:30 PM or perhaps earlier at 6:30 PM. Would either of those work for you?"\n\n4. Collect additional information when necessary:\n   - Special requests (seating preferences, dietary needs): "Do you have any special seating requests or dietary preferences we should know about?"\n   - Occasion: "Is there a special occasion you\'d like us to know about, like a birthday or anniversary?"\n\n5. Confirm contact information:\n   - "Could I have your name and contact number to finalize your reservation, please?"\n\n6. Summarize the entire reservation clearly and succinctly:\n   - "Just to recap, you have a reservation under the name John Smith for four people tomorrow evening at 7:30 PM. Everything correct?"\n\n7. Politely conclude and thank them warmly:\n   - "Fantastic, your reservation is confirmed! We\'re looking forward to welcoming you. Have a wonderful day!"\n\nThroughout the interaction, ensure:\n- Responses are immediate, minimizing any noticeable delay.\n- Tone remains reassuring and attentive, actively acknowledging all details provided by the caller.\n- If you detect a language other than English, smoothly transition to that language without interruption.\n- Maintain an engaging, conversational pace, proactively clarifying and confirming details to avoid misunderstandings.',
+        modalities: ['text'],
+        instructions: 'ALWAYS USE THE TOOL FUNCTION. You are the reservation assistant for Casa Masa restaurant. Start with: "Hello! Welcome to Casa Masa, thank you for calling. What brings you in today?" Then collect ALL required information BEFORE calling the function tool. Required: date, time, number of guests, name, phone, email. ONLY call make_reservation when you have ALL these details confirmed. Keep responses VERY SHORT and conversational.',
         input_audio_format: 'g711_ulaw',
         input_audio_transcription: {
           model: 'whisper-1'
         },
         turn_detection: {
           type: 'server_vad',
-          threshold: 0.1,
-          prefix_padding_ms: 100,
-          silence_duration_ms: 300
+          threshold: 0.5,
+          prefix_padding_ms: 300,
+          silence_duration_ms: 200
         },
         tools: [{
           type: 'function',
@@ -188,7 +188,7 @@ wss.on('connection', (ws) => {
       }
     }));
     
-    // Message d'accueil avec ElevenLabs WebSocket
+    // Message d'accueil
     setTimeout(() => {
       if (elevenLabsWs && elevenLabsWs.readyState === WebSocket.OPEN) {
         elevenLabsWs.send(JSON.stringify({
@@ -196,38 +196,74 @@ wss.on('connection', (ws) => {
           flush: true
         }));
       }
-    }, 1000);
+    }, 500);
   });
 
   let textBuffer = '';
+  let responseId = null;
   
   openaiWs.on('message', async (data) => {
     try {
       const response = JSON.parse(data);
       
-      // Capturer le texte en streaming
-      if (response.type === 'response.text.delta' && response.delta) {
+      // Détection de parole utilisateur pour interruption
+      if (response.type === 'input_audio_buffer.speech_started') {
+        console.log('Utilisateur commence à parler - interruption');
+        isUserSpeaking = true;
+        lastInterruptTime = Date.now();
+        
+        // Interrompre la génération OpenAI
+        if (responseId) {
+          openaiWs.send(JSON.stringify({
+            type: 'response.cancel'
+          }));
+        }
+        
+        // Clear audio Twilio
+        ws.send(JSON.stringify({
+          event: 'clear'
+        }));
+        
+        // Flush ElevenLabs
+        if (elevenLabsWs && elevenLabsWs.readyState === WebSocket.OPEN) {
+          elevenLabsWs.send(JSON.stringify({
+            text: " ",
+            flush: true
+          }));
+        }
+        
+        textBuffer = '';
+      }
+      
+      if (response.type === 'input_audio_buffer.speech_stopped') {
+        isUserSpeaking = false;
+      }
+      
+      // Capturer l'ID de réponse pour pouvoir l'annuler
+      if (response.type === 'response.created') {
+        responseId = response.response.id;
+      }
+      
+      // Streaming du texte
+      if (response.type === 'response.text.delta' && response.delta && !isUserSpeaking) {
         textBuffer += response.delta;
         
-        // Envoyer à ElevenLabs par chunks
-        const chunks = textBuffer.match(/.{1,50}[.!?,\s]|.{1,50}$/g) || [];
-        
-        if (chunks.length > 1) {
-          const chunkToSend = chunks[0];
-          textBuffer = textBuffer.substring(chunkToSend.length);
-          
+        // Envoyer immédiatement par petits chunks
+        if (textBuffer.length > 10) {
           if (elevenLabsWs && elevenLabsWs.readyState === WebSocket.OPEN) {
             elevenLabsWs.send(JSON.stringify({
-              text: chunkToSend,
+              text: textBuffer,
               flush: false
             }));
+            textBuffer = '';
           }
         }
       }
       
-      // Fin de la réponse - envoyer le reste
+      // Fin de réponse
       if (response.type === 'response.done') {
-        if (textBuffer.trim() && elevenLabsWs && elevenLabsWs.readyState === WebSocket.OPEN) {
+        responseId = null;
+        if (textBuffer.trim() && elevenLabsWs && elevenLabsWs.readyState === WebSocket.OPEN && !isUserSpeaking) {
           elevenLabsWs.send(JSON.stringify({
             text: textBuffer,
             flush: true
