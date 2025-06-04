@@ -138,7 +138,7 @@ wss.on('connection', (ws) => {
       type: 'session.update',
       session: {
         modalities: ['text'],
-        instructions: 'You are the reservation assistant for Casa Masa restaurant. Collect ALL required information BEFORE calling the function tool. Required: date, time, number of guests, name, phone, email. ONLY call make_reservation when you have ALL these details confirmed. Keep responses VERY SHORT and conversational. Be natural and human-like. Never repeat yourself.',
+        instructions: 'You are the reservation assistant for Casa Masa restaurant. CRITICAL: When the user starts speaking, IMMEDIATELY STOP your response mid-sentence. Do not finish your thought. Just stop. Collect ALL required information BEFORE calling the function tool. Required: date, time, number of guests, name, phone, email. ONLY call make_reservation when you have ALL these details confirmed. Keep responses VERY SHORT and conversational. Be natural and human-like. Never repeat yourself.',
         input_audio_format: 'g711_ulaw',
         input_audio_transcription: {
           model: 'whisper-1'
@@ -220,32 +220,12 @@ wss.on('connection', (ws) => {
       
       // Détection de parole utilisateur pour interruption
       if (response.type === 'input_audio_buffer.speech_started') {
-        console.log('Utilisateur commence à parler - HARD STOP');
+        console.log('Utilisateur commence à parler - STOP AUDIO');
         isUserSpeaking = true;
+        shouldStop = true;
+        audioBuffer = [];
         
-        // 1. Envoyer commande STOP à Twilio
-        ws.send(JSON.stringify({
-          event: 'stop',
-          streamSid: ws.streamSid,
-          stop: {
-            accountSid: ws.accountSid,
-            callSid: ws.callSid
-          }
-        }));
-        
-        // 2. Reconnecter immédiatement le stream
-        setTimeout(() => {
-          ws.send(JSON.stringify({
-            event: 'start',
-            streamSid: ws.streamSid,
-            start: {
-              accountSid: ws.accountSid,
-              callSid: ws.callSid
-            }
-          }));
-        }, 50);
-        
-        // 3. Annuler OpenAI
+        // Annuler OpenAI
         if (responseId) {
           openaiWs.send(JSON.stringify({
             type: 'response.cancel'
@@ -253,13 +233,13 @@ wss.on('connection', (ws) => {
           responseId = null;
         }
         
-        // 4. Tuer ElevenLabs
+        // Tuer ElevenLabs
         if (elevenLabsWs) {
           elevenLabsWs.terminate();
           elevenLabsWs = null;
         }
         
-        // 5. Reconnecter ElevenLabs
+        // Reconnecter ElevenLabs après un court délai
         setTimeout(() => {
           connectElevenLabs();
           isUserSpeaking = false;
