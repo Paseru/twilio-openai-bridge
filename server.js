@@ -237,6 +237,14 @@ wss.on('connection', (ws) => {
           event: 'clear'
         }));
         
+        // Fermer et rouvrir ElevenLabs pour vraiment couper l'audio
+        if (elevenLabsWs && elevenLabsWs.readyState === WebSocket.OPEN) {
+          elevenLabsWs.close();
+          setTimeout(() => {
+            connectElevenLabs();
+          }, 100);
+        }
+        
         textBuffer = '';
       }
       
