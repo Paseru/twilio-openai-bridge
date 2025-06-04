@@ -138,7 +138,7 @@ wss.on('connection', (ws) => {
       type: 'session.update',
       session: {
         modalities: ['text'],
-        instructions: 'ALWAYS USE THE TOOL FUNCTION. You are the reservation assistant for Casa Masa restaurant. Start with: "Hello! Welcome to Casa Masa, thank you for calling. What brings you in today?" Then collect ALL required information BEFORE calling the function tool. Required: date, time, number of guests, name, phone, email. ONLY call make_reservation when you have ALL these details confirmed. Keep responses VERY SHORT and conversational.',
+        instructions: 'You are the reservation assistant for Casa Masa restaurant. Collect ALL required information BEFORE calling the function tool. Required: date, time, number of guests, name, phone, email. ONLY call make_reservation when you have ALL these details confirmed. Keep responses VERY SHORT and conversational. Be natural and human-like. Never repeat yourself.',
         input_audio_format: 'g711_ulaw',
         input_audio_transcription: {
           model: 'whisper-1'
@@ -188,12 +188,24 @@ wss.on('connection', (ws) => {
       }
     }));
     
-    // Message d'accueil
+    // Message d'accueil - une seule fois
     setTimeout(() => {
       if (elevenLabsWs && elevenLabsWs.readyState === WebSocket.OPEN) {
-        elevenLabsWs.send(JSON.stringify({
-          text: "Hello! Welcome to Casa Masa, thank you for calling. What brings you in today?",
-          flush: true
+        // Créer le message via OpenAI pour qu'il soit dans la conversation
+        openaiWs.send(JSON.stringify({
+          type: 'conversation.item.create',
+          item: {
+            type: 'message',
+            role: 'assistant',
+            content: [{
+              type: 'text',
+              text: 'Hello! Welcome to Casa Masa, thank you for calling. What brings you in today?'
+            }]
+          }
+        }));
+        
+        openaiWs.send(JSON.stringify({
+          type: 'response.create'
         }));
       }
     }, 500);
@@ -212,25 +224,18 @@ wss.on('connection', (ws) => {
         isUserSpeaking = true;
         lastInterruptTime = Date.now();
         
-        // Interrompre la génération OpenAI
+        // Interrompre la génération OpenAI seulement s'il y a une réponse en cours
         if (responseId) {
           openaiWs.send(JSON.stringify({
             type: 'response.cancel'
           }));
+          responseId = null;
         }
         
         // Clear audio Twilio
         ws.send(JSON.stringify({
           event: 'clear'
         }));
-        
-        // Flush ElevenLabs
-        if (elevenLabsWs && elevenLabsWs.readyState === WebSocket.OPEN) {
-          elevenLabsWs.send(JSON.stringify({
-            text: " ",
-            flush: true
-          }));
-        }
         
         textBuffer = '';
       }
@@ -244,8 +249,8 @@ wss.on('connection', (ws) => {
         responseId = response.response.id;
       }
       
-      // Streaming du texte
-      if (response.type === 'response.text.delta' && response.delta && !isUserSpeaking) {
+      // Streaming du texte - toujours envoyer, OpenAI gère l'interruption
+      if (response.type === 'response.text.delta' && response.delta) {
         textBuffer += response.delta;
         
         // Envoyer immédiatement par petits chunks
@@ -263,7 +268,7 @@ wss.on('connection', (ws) => {
       // Fin de réponse
       if (response.type === 'response.done') {
         responseId = null;
-        if (textBuffer.trim() && elevenLabsWs && elevenLabsWs.readyState === WebSocket.OPEN && !isUserSpeaking) {
+        if (textBuffer.trim() && elevenLabsWs && elevenLabsWs.readyState === WebSocket.OPEN) {
           elevenLabsWs.send(JSON.stringify({
             text: textBuffer,
             flush: true
