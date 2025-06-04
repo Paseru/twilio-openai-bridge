@@ -222,9 +222,30 @@ wss.on('connection', (ws) => {
       if (response.type === 'input_audio_buffer.speech_started') {
         console.log('Utilisateur commence à parler - HARD STOP');
         isUserSpeaking = true;
-        lastInterruptTime = Date.now();
         
-        // 1. Annuler TOUTE génération OpenAI
+        // 1. Envoyer commande STOP à Twilio
+        ws.send(JSON.stringify({
+          event: 'stop',
+          streamSid: ws.streamSid,
+          stop: {
+            accountSid: ws.accountSid,
+            callSid: ws.callSid
+          }
+        }));
+        
+        // 2. Reconnecter immédiatement le stream
+        setTimeout(() => {
+          ws.send(JSON.stringify({
+            event: 'start',
+            streamSid: ws.streamSid,
+            start: {
+              accountSid: ws.accountSid,
+              callSid: ws.callSid
+            }
+          }));
+        }, 50);
+        
+        // 3. Annuler OpenAI
         if (responseId) {
           openaiWs.send(JSON.stringify({
             type: 'response.cancel'
@@ -232,33 +253,17 @@ wss.on('connection', (ws) => {
           responseId = null;
         }
         
-        // 2. Clear TOUT l'audio Twilio
-        ws.send(JSON.stringify({
-          event: 'clear'
-        }));
-        
-        // 3. Envoyer du silence pour forcer l'arrêt immédiat
-        for (let i = 0; i < 10; i++) {
-          ws.send(JSON.stringify({
-            event: 'media',
-            streamSid: ws.streamSid,
-            media: {
-              payload: Buffer.alloc(160).toString('base64') // Silence mulaw
-            }
-          }));
-        }
-        
-        // 4. Tuer complètement ElevenLabs
+        // 4. Tuer ElevenLabs
         if (elevenLabsWs) {
-          elevenLabsWs.terminate(); // Force kill
+          elevenLabsWs.terminate();
           elevenLabsWs = null;
         }
         
-        // 5. Reconnecter après un délai
+        // 5. Reconnecter ElevenLabs
         setTimeout(() => {
           connectElevenLabs();
           isUserSpeaking = false;
-        }, 200);
+        }, 100);
         
         textBuffer = '';
       }
@@ -335,6 +340,8 @@ wss.on('connection', (ws) => {
       if (data.event === 'start') {
         console.log('Stream Twilio démarré');
         ws.streamSid = data.start.streamSid;
+        ws.accountSid = data.start.accountSid;
+        ws.callSid = data.start.callSid;
       }
       
       if (data.event === 'media') {
