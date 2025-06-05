@@ -357,7 +357,7 @@ wss.on('connection', (ws, req) => {
           use_speaker_boost: true
         },
         generation_config: {
-          chunk_length_schedule: [50, 120, 160, 250, 500] // Optimisé pour la réactivité
+          chunk_length_schedule: [30, 80, 120] // Chunks plus petits pour interruption plus rapide
         }
       }));
     });
@@ -477,13 +477,16 @@ Remember: Wait for customer responses and don't rush the conversation.`,
         input_audio_transcription: {
           model: 'whisper-1'
         },
+        input_audio_noise_reduction: {
+          type: 'near_field'
+        },
         speed: 1.5,
         temperature: 1.2,
         turn_detection: {
           type: 'server_vad',
-          threshold: 0.4, // Plus sensible
-          prefix_padding_ms: 150, // Réduit
-          silence_duration_ms: 150, // Augmenté pour laisser plus de temps
+          threshold: 0.3, // Plus sensible pour détecter rapidement
+          prefix_padding_ms: 100, // Réduit pour réaction plus rapide
+          silence_duration_ms: 100, // Réduit pour interruption plus rapide
           create_response: true
         },
         tools: [
@@ -599,11 +602,11 @@ Remember: Wait for customer responses and don't rush the conversation.`,
       if (elevenLabsWs && elevenLabsWs.readyState === WebSocket.OPEN && !hasGreeted) {
         hasGreeted = true;
         elevenLabsWs.send(JSON.stringify({
-          text: "Hello, Casa Masa restaurant, how can I help you ?",
+          text: "Hello, Casa Masa restaurant, how can I help you today?",
           flush: true
         }));
       }
-    }, 300); // Délai plus court
+    }, 800); // Délai plus court
   });
 
   let textBuffer = '';
@@ -615,18 +618,32 @@ Remember: Wait for customer responses and don't rush the conversation.`,
       
       // Détecter quand l'utilisateur commence à parler
       if (response.type === 'input_audio_buffer.speech_started') {
-        console.log('Utilisateur commence à parler');
+        console.log('Utilisateur commence à parler - INTERRUPTION');
         isUserSpeaking = true;
         conversationStarted = true;
         
-        // Interrompre l'assistant si il parle
-        if (isAssistantSpeaking && elevenLabsWs && elevenLabsWs.readyState === WebSocket.OPEN) {
-          elevenLabsWs.send(JSON.stringify({
-            text: "",
-            flush: true
-          }));
+        // INTERRUPTION IMMÉDIATE - Annuler toute génération en cours
+        if (isAssistantSpeaking) {
+          console.log('Interruption de l\'assistant');
+          
+          // 1. Vider le buffer texte
           textBuffer = '';
           isAssistantSpeaking = false;
+          
+          // 2. Stopper ElevenLabs immédiatement
+          if (elevenLabsWs && elevenLabsWs.readyState === WebSocket.OPEN) {
+            elevenLabsWs.send(JSON.stringify({
+              text: "",
+              flush: true
+            }));
+          }
+          
+          // 3. Annuler la réponse OpenAI en cours
+          if (openaiWs.readyState === WebSocket.OPEN) {
+            openaiWs.send(JSON.stringify({
+              type: 'response.cancel'
+            }));
+          }
         }
       }
       
