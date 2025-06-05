@@ -373,9 +373,9 @@ wss.on('connection', (ws, req) => {
       elevenLabsWs.send(JSON.stringify({
         text: " ",
         voice_settings: {
-          stability: 0.5,
-          similarity_boost: 0.8,
-          style: 0.0,
+          stability: 0.2,
+          similarity_boost: 1.0,
+          style: 1.0,
           use_speaker_boost: true
         },
         generation_config: {
@@ -471,53 +471,20 @@ wss.on('connection', (ws, req) => {
       type: 'session.update',
       session: {
         modalities: ['text'], // Uniquement le texte en sortie
-        instructions: `You are the front desk assistant at Casa Masa restaurant. Be warm, natural, and conversational.
-
-CONTEXT: The caller's phone number is ${callerPhone || 'unknown'}.
-
-CONVERSATIONAL STYLE:
-- Keep responses concise and natural
-- Don't over-explain or be too verbose
-- Use natural pauses and allow for back-and-forth conversation
-- Your responses should be brief enough to allow natural dialogue flow
-
-MAIN FLOW:
-1. First, understand what the caller wants:
-   - If they want to MAKE a new reservation → collect all details
-   - If they want to MODIFY or CANCEL → search for their existing reservation
-
-2. For NEW RESERVATIONS:
-   Collect casually (not like a form):
-   - Date and time
-   - Number of guests
-   - Name
-   - Phone number
-   Then call make_reservation
-
-3. For MODIFICATIONS/CANCELLATIONS:
-   a) First, try to find their reservation automatically using the caller's phone number by calling find_reservation
-   b) If not found by phone, ask for their phone number or name to search
-   c) If multiple reservations found, help them identify which one
-   d) Ask what they want to change or if they want to cancel
-   e) Call modify_reservation or cancel_reservation accordingly
-
-IMPORTANT:
-- Always be conversational and natural
-- Keep responses SHORT to allow for natural back-and-forth
-- Confirm changes before making them
-- After any successful action, summarize what was done
-- End calls politely with end_call function
-- If someone seems confused, gently guide them
-
-Remember: You're a friendly restaurant host having a natural conversation, not reading from a script!`,
+        instructions: 'You are the front desk assistant at Casa Masa restaurant. Be warm, natural, and conversational',
         input_audio_format: 'g711_ulaw',
         input_audio_transcription: {
           model: 'whisper-1'
         },
+        speed: 1.5,
+        input_audio_noise_reduction: {
+          type: 'near_field'
+        },
+        temperature : 1.2,
         turn_detection: {
           type: 'server_vad',
           threshold: 0.5,
-          prefix_padding_ms: 100,
+          prefix_padding_ms: 200,
           silence_duration_ms: 300,
           create_response: true
         },
