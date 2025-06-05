@@ -18,13 +18,13 @@ const serviceAccountAuth = new JWT({
   scopes: ['https://www.googleapis.com/auth/spreadsheets']
 });
 
-// Configuration ElevenLabs
+// Configuration ElevenLabs - Optimisée pour la latence
 const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY;
 const ELEVENLABS_VOICE_ID = process.env.ELEVENLABS_VOICE_ID || 'EXAVITQu4vr4xnSDxMaL';
 
 // Configuration son d'ambiance
 const BACKGROUND_SOUND_PATH = process.env.BACKGROUND_SOUND_PATH || './restaurant-ambiance.raw';
-const BACKGROUND_VOLUME = parseFloat(process.env.BACKGROUND_VOLUME || '0.15');
+const BACKGROUND_VOLUME = parseFloat(process.env.BACKGROUND_VOLUME || '0.08'); // Réduit le volume
 
 // Tables de conversion µ-law
 const ULAW_DECODE_TABLE = new Int16Array([
@@ -104,7 +104,15 @@ async function addReservation(reservationData) {
     });
     
     console.log('Réservation ajoutée au Google Sheet');
-    return { success: true, message: 'Reservation added successfully' };
+    return { 
+      success: true, 
+      message: 'Reservation confirmed successfully',
+      details: {
+        date: reservationData.reservation_date,
+        guests: reservationData.guests_count,
+        name: reservationData.contact_info.name
+      }
+    };
   } catch (error) {
     console.error('Erreur Google Sheets:', error);
     return { success: false, error: error.message };
@@ -246,20 +254,22 @@ async function cancelReservation(cancellationData) {
   }
 }
 
-// Fonction pour terminer l'appel
-async function endCall(ws) {
+// Fonction pour terminer l'appel avec délai
+async function endCall(ws, delay = 3000) {
   try {
     console.log('Fin de l\'appel demandée par l\'assistant');
     
-    // Envoyer le signal de raccrochage à Twilio
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({
-        event: 'hangup',
-        streamSid: ws.streamSid
-      }));
-    }
+    // Attendre un délai avant de raccrocher pour permettre la fin du message
+    setTimeout(() => {
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({
+          event: 'hangup',
+          streamSid: ws.streamSid
+        }));
+      }
+    }, delay);
     
-    return { success: true, message: 'Call ended successfully' };
+    return { success: true, message: 'Call will end shortly' };
   } catch (error) {
     console.error('Erreur lors du raccrochage:', error);
     return { success: false, error: error.message };
@@ -294,16 +304,16 @@ wss.on('connection', (ws, req) => {
   console.log('Numéro appelant:', callerPhone);
   
   let elevenLabsWs = null;
-  let audioQueue = [];
   let isPlaying = false;
   
-  // Variables pour le backchanneling
+  // Variables pour la gestion de conversation
   let lastUserSpeechTime = Date.now();
-  let backchannelTimeout = null;
   let isUserSpeaking = false;
   let conversationStarted = false;
+  let hasGreeted = false; // Éviter les salutations multiples
+  let pendingReservation = null; // Stocker la réservation en cours
   
-  // Variables pour le son d'ambiance
+  // Variables pour le son d'ambiance - optimisées
   let backgroundSoundBuffer = null;
   let backgroundSoundPosition = 0;
   let isSendingBackground = false;
@@ -326,41 +336,9 @@ wss.on('connection', (ws, req) => {
     }
   }
   
-  // Fonction pour envoyer du backchanneling
-  function sendBackchannel() {
-    const backchannelPhrases = [
-      "Mhm",
-      "Yeah",
-      "I see",
-      "Uh-huh",
-      "Okay",
-      "Got it",
-      "Sure",
-      "Right",
-      "Of course",
-      "I understand",
-      "Absolutely"
-    ];
-    
-    const phrase = backchannelPhrases[Math.floor(Math.random() * backchannelPhrases.length)];
-    
-    if (elevenLabsWs && elevenLabsWs.readyState === WebSocket.OPEN) {
-      elevenLabsWs.send(JSON.stringify({
-        text: phrase,
-        voice_settings: {
-          stability: 0.7,
-          similarity_boost: 0.8,
-          style: 0.0,
-          use_speaker_boost: true
-        },
-        flush: true
-      }));
-    }
-  }
-  
-  // Fonction pour créer une connexion ElevenLabs WebSocket
+  // Fonction pour créer une connexion ElevenLabs WebSocket optimisée
   function connectElevenLabs() {
-    elevenLabsWs = new WebSocket('wss://api.elevenlabs.io/v1/text-to-speech/' + ELEVENLABS_VOICE_ID + '/stream-input?model_id=eleven_flash_v2&output_format=ulaw_8000', {
+    elevenLabsWs = new WebSocket('wss://api.elevenlabs.io/v1/text-to-speech/' + ELEVENLABS_VOICE_ID + '/stream-input?model_id=eleven_flash_v2_5&output_format=ulaw_8000', {
       headers: {
         'xi-api-key': ELEVENLABS_API_KEY
       }
@@ -369,17 +347,17 @@ wss.on('connection', (ws, req) => {
     elevenLabsWs.on('open', () => {
       console.log('ElevenLabs WebSocket connecté');
       
-      // Configuration initiale
+      // Configuration optimisée pour la latence
       elevenLabsWs.send(JSON.stringify({
         text: " ",
         voice_settings: {
-          stability: 0.2,
-          similarity_boost: 1.0,
-          style: 1.0,
+          stability: 0.4,
+          similarity_boost: 0.9,
+          style: 0.2,
           use_speaker_boost: true
         },
         generation_config: {
-          chunk_length_schedule: [50]
+          chunk_length_schedule: [50, 120, 160, 250, 500] // Optimisé pour la réactivité
         }
       }));
     });
@@ -392,18 +370,20 @@ wss.on('connection', (ws, req) => {
         isSendingBackground = false;
         
         // Envoyer directement à Twilio (déjà en ulaw)
-        ws.send(JSON.stringify({
-          event: 'media',
-          streamSid: ws.streamSid,
-          media: {
-            payload: response.audio
-          }
-        }));
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({
+            event: 'media',
+            streamSid: ws.streamSid,
+            media: {
+              payload: response.audio
+            }
+          }));
+        }
         
-        // Reprendre le son d'ambiance après un délai
+        // Reprendre le son d'ambiance après un délai plus court
         setTimeout(() => {
           isSendingBackground = true;
-        }, 100);
+        }, 50);
       }
     });
     
@@ -430,12 +410,12 @@ wss.on('connection', (ws, req) => {
     // Créer la connexion ElevenLabs
     connectElevenLabs();
     
-    // Démarrer le son d'ambiance
+    // Démarrer le son d'ambiance (volume réduit)
     if (loadBackgroundSound()) {
       console.log('Son d\'ambiance activé');
       isSendingBackground = true;
       
-      // Envoyer le son d'ambiance toutes les 20ms
+      // Envoyer le son d'ambiance moins fréquemment pour réduire la charge
       backgroundInterval = setInterval(() => {
         if (isSendingBackground && ws.readyState === WebSocket.OPEN && backgroundSoundBuffer) {
           const chunkSize = 160;
@@ -447,7 +427,7 @@ wss.on('connection', (ws, req) => {
           
           backgroundSoundPosition = (backgroundSoundPosition + chunkSize) % backgroundSoundBuffer.length;
           
-          // Ajuster le volume
+          // Ajuster le volume (plus faible)
           const adjustedChunk = Buffer.alloc(chunkSize);
           for (let i = 0; i < chunkSize; i++) {
             const sample = ulaw2linear(chunk[i]);
@@ -463,29 +443,47 @@ wss.on('connection', (ws, req) => {
             }
           }));
         }
-      }, 20);
+      }, 25); // Moins fréquent
     }
     
-    // Configuration de la session avec contexte du numéro appelant
+    // Configuration de session optimisée
     openaiWs.send(JSON.stringify({
       type: 'session.update',
       session: {
-        modalities: ['text'], // Uniquement le texte en sortie
-        instructions: 'You are the front desk assistant at Casa Masa restaurant. Be warm, natural, and conversational',
+        modalities: ['text'],
+        instructions: `You are Maria, the friendly front desk assistant at Casa Masa restaurant. 
+
+IMPORTANT CONVERSATION FLOW:
+1. After greeting, WAIT for the customer to speak before saying anything else
+2. When taking a reservation, after confirming details, ALWAYS ask: "Is there anything else I can help you with today?"
+3. Only end the call when the customer says goodbye or indicates they're done
+4. Keep responses concise and natural - avoid being too chatty
+5. Don't repeat information unnecessarily
+
+PERSONALITY:
+- Warm, professional, and conversational
+- Use natural speech patterns with occasional "um", "let's see", etc.
+- Be patient and helpful
+- Speak at a comfortable pace
+
+RESERVATION PROCESS:
+- Get date, time, number of guests, and name
+- Confirm all details before booking
+- After successful booking, ask if they need anything else
+- Be helpful with modifications or questions
+
+Remember: Wait for customer responses and don't rush the conversation.`,
         input_audio_format: 'g711_ulaw',
         input_audio_transcription: {
           model: 'whisper-1'
         },
         speed: 1.5,
-        input_audio_noise_reduction: {
-          type: 'near_field'
-        },
-        temperature : 1.2,
+        temperature: 1.2,
         turn_detection: {
           type: 'server_vad',
-          threshold: 0.5,
-          prefix_padding_ms: 200,
-          silence_duration_ms: 300,
+          threshold: 0.4, // Plus sensible
+          prefix_padding_ms: 150, // Réduit
+          silence_duration_ms: 400, // Augmenté pour laisser plus de temps
           create_response: true
         },
         tools: [
@@ -585,7 +583,7 @@ wss.on('connection', (ws, req) => {
           {
             type: 'function',
             name: 'end_call',
-            description: 'End the phone call politely',
+            description: 'End the phone call politely after customer is done',
             parameters: {
               type: 'object',
               properties: {},
@@ -596,18 +594,20 @@ wss.on('connection', (ws, req) => {
       }
     }));
     
-    // Message d'accueil avec ElevenLabs WebSocket
+    // Message d'accueil - seulement une fois
     setTimeout(() => {
-      if (elevenLabsWs && elevenLabsWs.readyState === WebSocket.OPEN) {
+      if (elevenLabsWs && elevenLabsWs.readyState === WebSocket.OPEN && !hasGreeted) {
+        hasGreeted = true;
         elevenLabsWs.send(JSON.stringify({
-          text: "Hello, Casa Masa restaurant, how can I help you today?",
+          text: "Hello, Casa Masa restaurant, how can I help you ?",
           flush: true
         }));
       }
-    }, 1000);
+    }, 300); // Délai plus court
   });
 
   let textBuffer = '';
+  let isAssistantSpeaking = false;
   
   openaiWs.on('message', async (data) => {
     try {
@@ -619,10 +619,14 @@ wss.on('connection', (ws, req) => {
         isUserSpeaking = true;
         conversationStarted = true;
         
-        // Annuler tout backchanneling en cours
-        if (backchannelTimeout) {
-          clearTimeout(backchannelTimeout);
-          backchannelTimeout = null;
+        // Interrompre l'assistant si il parle
+        if (isAssistantSpeaking && elevenLabsWs && elevenLabsWs.readyState === WebSocket.OPEN) {
+          elevenLabsWs.send(JSON.stringify({
+            text: "",
+            flush: true
+          }));
+          textBuffer = '';
+          isAssistantSpeaking = false;
         }
       }
       
@@ -637,34 +641,15 @@ wss.on('connection', (ws, req) => {
       if (response.type === 'conversation.item.input_audio_transcription.completed') {
         const transcript = response.transcript;
         console.log('Transcription:', transcript);
-        
-        // Si l'utilisateur parle depuis plus de 3 secondes, programmer un backchanneling
-        if (transcript && transcript.split(' ').length > 10 && conversationStarted) {
-          const delay = 1000 + Math.random() * 1000;
-          
-          if (!backchannelTimeout && isUserSpeaking) {
-            backchannelTimeout = setTimeout(() => {
-              if (isUserSpeaking) {
-                sendBackchannel();
-                backchannelTimeout = null;
-              }
-            }, delay);
-          }
-        }
       }
       
-      // Capturer le texte en streaming
+      // Capturer le texte en streaming - optimisé
       if (response.type === 'response.text.delta' && response.delta) {
         textBuffer += response.delta;
+        isAssistantSpeaking = true;
         
-        // L'assistant est en train de parler, pas de backchanneling
-        if (backchannelTimeout) {
-          clearTimeout(backchannelTimeout);
-          backchannelTimeout = null;
-        }
-        
-        // Envoyer à ElevenLabs par chunks
-        const chunks = textBuffer.match(/.{1,50}[.!?,\s]|.{1,50}$/g) || [];
+        // Envoyer à ElevenLabs par chunks plus petits pour la réactivité
+        const chunks = textBuffer.match(/.{1,30}[.!?,\s]|.{1,40}$/g) || [];
         
         if (chunks.length > 1) {
           const chunkToSend = chunks[0];
@@ -688,6 +673,7 @@ wss.on('connection', (ws, req) => {
           }));
           textBuffer = '';
         }
+        isAssistantSpeaking = false;
       }
       
       // Gestion des appels de fonction
@@ -700,6 +686,7 @@ wss.on('connection', (ws, req) => {
         switch(response.name) {
           case 'make_reservation':
             result = await addReservation(args);
+            pendingReservation = result; // Stocker pour suivi
             break;
             
           case 'find_reservation':
@@ -719,7 +706,7 @@ wss.on('connection', (ws, req) => {
             break;
             
           case 'end_call':
-            result = await endCall(ws);
+            result = await endCall(ws, 2000); // Délai plus court
             
             // Fermer les connexions après le raccrochage
             setTimeout(() => {
@@ -732,7 +719,7 @@ wss.on('connection', (ws, req) => {
               if (ws.readyState === WebSocket.OPEN) {
                 ws.close();
               }
-            }, 1000);
+            }, 2500);
             break;
         }
         
@@ -782,6 +769,10 @@ wss.on('connection', (ws, req) => {
         }
         if (elevenLabsWs && elevenLabsWs.readyState === WebSocket.OPEN) {
           elevenLabsWs.close();
+        }
+        if (backgroundInterval) {
+          clearInterval(backgroundInterval);
+          backgroundInterval = null;
         }
       }
       
