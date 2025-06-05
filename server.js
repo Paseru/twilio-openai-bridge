@@ -484,9 +484,9 @@ Remember: Wait for customer responses and don't rush the conversation.`,
         temperature: 1.2,
         turn_detection: {
           type: 'server_vad',
-          threshold: 0.3, // Plus sensible pour détecter rapidement
-          prefix_padding_ms: 100, // Réduit pour réaction plus rapide
-          silence_duration_ms: 100, // Réduit pour interruption plus rapide
+          threshold: 0.4, // Plus sensible pour détecter rapidement
+          prefix_padding_ms: 400, // Réduit pour réaction plus rapide
+          silence_duration_ms: 300, // Réduit pour interruption plus rapide
           create_response: true
         },
         tools: [
