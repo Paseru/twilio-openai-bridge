@@ -1,153 +1,144 @@
-const express = require('express');
-const WebSocket = require('ws');
+// ------------------------------------------------------------
+//  Casa Masa realtime voice‑bot — ultra‑low‑latency version
+//  Stack : Twilio Media Streams ↔ OpenAI Realtime (gpt‑4.1‑nano)
+//          ↔ ElevenLabs streaming TTS  ↔ Twilio RTP
+//  Persistance   : Google Sheets
+// ------------------------------------------------------------
+
+require('dotenv').config();
+const express            = require('express');
+const WebSocket          = require('ws');
 const { GoogleSpreadsheet } = require('google-spreadsheet');
-const { JWT } = require('google-auth-library');
-const app = express();
+const { JWT }            = require('google-auth-library');
+const http               = require('http');
+
+const app  = express();
 const port = process.env.PORT || 3000;
+const TWILIO_REGION = process.env.TWILIO_REGION || 'ie1';          // proche du PoP Twilio
 
-app.use(express.urlencoded({ extended: true }));
-app.use(express.json());
-
-// Configuration Google Sheets
+//--------------------------------------------------------------
+//  GOOGLE SHEETS SETUP
+//--------------------------------------------------------------
 const GOOGLE_SHEET_ID = '1qr1nMXsG5BQvEFisli3qnKCbFiXX0xK6EWXhGZ1hbxM';
 const serviceAccountAuth = new JWT({
   email: 'smart-ai-partners@test-b8502.iam.gserviceaccount.com',
-  key: process.env.GOOGLE_PRIVATE_KEY.replace(/\\n/g, '\n'),
+  key:   process.env.GOOGLE_PRIVATE_KEY.replace(/\\n/g, '\n'),
   scopes: ['https://www.googleapis.com/auth/spreadsheets']
 });
 
-// Configuration ElevenLabs
-const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY;
-const ELEVENLABS_VOICE_ID = process.env.ELEVENLABS_VOICE_ID || 'EXAVITQu4vr4xnSDxMaL';
-
-// Fonction pour ajouter une réservation
-async function addReservation(reservationData) {
+async function addReservation (data) {
   try {
     const doc = new GoogleSpreadsheet(GOOGLE_SHEET_ID, serviceAccountAuth);
     await doc.loadInfo();
     const sheet = doc.sheetsByIndex[0];
-    
     await sheet.addRow({
-      Date: reservationData.reservation_date,
-      Guests: reservationData.guests_count,
-      Name: reservationData.contact_info.name,
-      Phone: reservationData.contact_info.phone,
-      Email: reservationData.contact_info.email || ''
+      Date:   data.reservation_date,
+      Guests: data.guests_count,
+      Name:   data.contact_info.name,
+      Phone:  data.contact_info.phone,
+      Email:  data.contact_info.email || ''
     });
-    
-    console.log('Réservation ajoutée au Google Sheet');
+    console.log('✅  Reservation saved to Google Sheets');
     return { success: true };
-  } catch (error) {
-    console.error('Erreur Google Sheets:', error);
-    return { success: false, error: error.message };
+  } catch (err) {
+    console.error('🛑  Google Sheets error', err);
+    return { success: false, error: err.message };
   }
 }
 
-app.get('/', (req, res) => {
-  res.send('Server running');
-});
+//--------------------------------------------------------------
+//  EXPRESS + TwiML ENDPOINTS
+//--------------------------------------------------------------
+app.use(express.urlencoded({ extended: true }));
+app.use(express.json());
+
+app.get('/', (_, res) => res.send('Server running'));
 
 app.post('/voice', (req, res) => {
-  console.log('Appel reçu');
+  console.log('📞  Incoming call');
   res.type('text/xml');
-  res.send(`
-    <Response>
-      <Connect>
-        <Stream url="wss://${req.get('host')}/media-stream" />
-      </Connect>
-    </Response>
-  `);
+  res.send(`<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Connect>
+    <Stream url="wss://${req.get('host')}/media-stream">
+      <Parameter name="Twilio-Region" value="${TWILIO_REGION}" />
+    </Stream>
+  </Connect>
+</Response>`);
 });
 
-const server = require('http').createServer(app);
-const wss = new WebSocket.Server({ server });
+//--------------------------------------------------------------
+//  SERVER + WS HUB
+//--------------------------------------------------------------
+const server = http.createServer(app);
+const wss    = new WebSocket.Server({ server });
 
-wss.on('connection', (ws) => {
-  console.log('WebSocket Twilio connecté');
-  
-  let elevenLabsWs = null;
+wss.on('connection', (clientWs) => {
+  console.log('🔗  Twilio WebSocket connected');
   let isUserSpeaking = false;
-  let lastInterruptTime = 0;
-  
-  // Fonction pour créer une connexion ElevenLabs WebSocket
-  function connectElevenLabs() {
-    elevenLabsWs = new WebSocket('wss://api.elevenlabs.io/v1/text-to-speech/' + ELEVENLABS_VOICE_ID + '/stream-input?model_id=eleven_flash_v2&output_format=ulaw_8000&optimize_streaming_latency=4&stability=0.3', {
-      headers: {
-        'xi-api-key': ELEVENLABS_API_KEY
+  let currentResponseId = null;
+
+  //----------------------------------------------------------
+  //  ELEVENLABS WS (kept open for the whole call)
+  //----------------------------------------------------------
+  const elevenLabsWs = new WebSocket(
+    `wss://api.elevenlabs.io/v1/text-to-speech/${process.env.ELEVENLABS_VOICE_ID || 'EXAVITQu4vr4xnSDxMaL'}/stream-input?model_id=eleven_flash_v2&output_format=ulaw_8000&optimize_streaming_latency=4`,
+    { headers: { 'xi-api-key': process.env.ELEVENLABS_API_KEY } }
+  );
+
+  elevenLabsWs.on('open', () => {
+    console.log('🔊  ElevenLabs WS ready');
+    elevenLabsWs.send(JSON.stringify({
+      text: ' ', // prime the stream (low‑latency hack)
+      voice_settings: {
+        stability: 0.3,
+        similarity_boost: 0.8,
+        style: 0.0,
+        use_speaker_boost: true,
+        speed: 1.1               // +10 % speed ↘ durée
       }
-    });
-    
-    elevenLabsWs.on('open', () => {
-      console.log('ElevenLabs WebSocket connecté');
-      
-      // Configuration pour latence minimale
-      elevenLabsWs.send(JSON.stringify({
-        text: " ",
-        voice_settings: {
-          stability: 0.3,
-          similarity_boost: 0.8,
-          style: 0.0,
-          use_speaker_boost: true
-        },
-        generation_config: {
-          chunk_length_schedule: [50]
-        }
+    }));
+  });
+
+  // pipe TTS packets to Twilio when caller is silent
+  elevenLabsWs.on('message', (data) => {
+    const msg = JSON.parse(data);
+    if (msg.audio && !isUserSpeaking) {
+      clientWs.send(JSON.stringify({
+        event:      'media',
+        streamSid:  clientWs.streamSid,
+        media: { payload: msg.audio }
       }));
-    });
-    
-    elevenLabsWs.on('message', (data) => {
-      const response = JSON.parse(data);
-      
-      if (response.audio && !isUserSpeaking) {
-        // Envoyer seulement si l'utilisateur ne parle pas
-        ws.send(JSON.stringify({
-          event: 'media',
-          streamSid: ws.streamSid,
-          media: {
-            payload: response.audio
-          }
-        }));
-      }
-    });
-    
-    elevenLabsWs.on('error', (error) => {
-      console.error('Erreur ElevenLabs WebSocket:', error);
-    });
-    
-    elevenLabsWs.on('close', () => {
-      console.log('ElevenLabs WebSocket fermé');
-    });
-  }
-  
-  // Connexion à OpenAI Realtime
-  const openaiWs = new WebSocket('wss://api.openai.com/v1/realtime?model=gpt-4o-mini-realtime-preview', {
-    headers: {
-      'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`,
-      'OpenAI-Beta': 'realtime=v1'
     }
   });
 
+  //----------------------------------------------------------
+  //  OPENAI REALTIME WS
+  //----------------------------------------------------------
+  const openaiWs = new WebSocket(
+    'wss://api.openai.com/v1/realtime?model=gpt-4.1-nano-realtime-preview',
+    {
+      headers: {
+        'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`,
+        'OpenAI-Beta':   'realtime=v1'
+      }
+    }
+  );
+
   openaiWs.on('open', () => {
-    console.log('OpenAI Realtime connecté');
-    
-    // Créer la connexion ElevenLabs
-    connectElevenLabs();
-    
-    // Configuration de la session
+    console.log('🤖  OpenAI Realtime WS ready');
+
+    // Session configuration
     openaiWs.send(JSON.stringify({
       type: 'session.update',
       session: {
         modalities: ['text'],
-        instructions: 'You are the reservation assistant for Casa Masa restaurant. CRITICAL: When the user starts speaking, IMMEDIATELY STOP your response mid-sentence. Do not finish your thought. Just stop. Collect ALL required information BEFORE calling the function tool. Required: date, time, number of guests, name, phone, email. ONLY call make_reservation when you have ALL these details confirmed. Keep responses VERY SHORT and conversational. Be natural and human-like. Never repeat yourself.',
-        input_audio_format: 'g711_ulaw',
-        input_audio_transcription: {
-          model: 'whisper-1'
-        },
+        instructions: `You are the front desk assistant at Casa Masa restaurant. Greet guests warmly and naturally, like you're welcoming them at the entrance. Guide the conversation in a relaxed, friendly tone. Ask for details casually and conversationally — not like filling a form. Before calling any function, make sure you’ve gently collected and confirmed all the following: – date – time – number of guests – name – phone number – email address Don’t rush. Let it feel like a real conversation. Only once everything is clear and confirmed, call make_reservation. Keep each response brief, warm, and human — like a host chatting with someone at the front desk.`,
+        input_audio_format:        'g711_ulaw',
+        input_audio_transcription: { model: 'whisper-1' },
         turn_detection: {
-          type: 'server_vad',
-          threshold: 0.5,
-          prefix_padding_ms: 300,
-          silence_duration_ms: 200
+          type: 'server_vad', threshold: 0.5,
+          prefix_padding_ms: 300, silence_duration_ms: 200
         },
         tools: [{
           type: 'function',
@@ -158,216 +149,152 @@ wss.on('connection', (ws) => {
             properties: {
               reservation_date: {
                 type: 'string',
-                description: 'Date and time in ISO format (YYYY-MM-DDTHH:MM:SS)'
+                description: 'Date and time ISO (YYYY-MM-DDTHH:MM)'
               },
-              guests_count: {
-                type: 'number',
-                description: 'Number of guests'
-              },
+              guests_count: { type: 'number' },
               contact_info: {
                 type: 'object',
                 properties: {
-                  name: {
-                    type: 'string',
-                    description: 'Customer name'
-                  },
-                  phone: {
-                    type: 'string',
-                    description: 'Phone number'
-                  },
-                  email: {
-                    type: 'string',
-                    description: 'Email address'
-                  }
+                  name:  { type: 'string' },
+                  phone: { type: 'string' },
+                  email: { type: 'string' }
                 }
               }
             },
-            required: ['reservation_date', 'guests_count', 'customer_name', 'phone_number']
+            required: ['reservation_date', 'guests_count', 'contact_info']
           }
         }]
       }
     }));
-    
-    // Message d'accueil - une seule fois
+
+    // Greeting (sent once, triggers response cycle)
     setTimeout(() => {
-      if (elevenLabsWs && elevenLabsWs.readyState === WebSocket.OPEN) {
-        // Créer le message via OpenAI pour qu'il soit dans la conversation
-        openaiWs.send(JSON.stringify({
-          type: 'conversation.item.create',
-          item: {
-            type: 'message',
-            role: 'assistant',
-            content: [{
-              type: 'text',
-              text: 'Hello! Welcome to Casa Masa, thank you for calling. What brings you in today?'
-            }]
-          }
-        }));
-        
-        openaiWs.send(JSON.stringify({
-          type: 'response.create'
-        }));
-      }
-    }, 500);
+      openaiWs.send(JSON.stringify({
+        type: 'conversation.item.create',
+        item: {
+          type:    'message',
+          role:    'assistant',
+          content: [{ type: 'text', text: 'Hello ?' }]
+        }
+      }));
+      openaiWs.send(JSON.stringify({ type: 'response.create' }));
+    }, 300);
   });
 
-  let textBuffer = '';
-  let responseId = null;
-  
+  //----------------------------------------------------------
+  //  OPENAI MESSAGE HANDLER
+  //----------------------------------------------------------
   openaiWs.on('message', async (data) => {
-    try {
-      const response = JSON.parse(data);
-      
-      // Détection de parole utilisateur pour interruption
-      if (response.type === 'input_audio_buffer.speech_started') {
-        console.log('Utilisateur commence à parler - STOP AUDIO');
-        isUserSpeaking = true;
-        shouldStop = true;
-        audioBuffer = [];
-        
-        // Annuler OpenAI
-        if (responseId) {
-          openaiWs.send(JSON.stringify({
-            type: 'response.cancel'
-          }));
-          responseId = null;
+    const msg = JSON.parse(data);
+
+    //------ Caller starts talking (barge‑in) -----------------
+    if (msg.type === 'input_audio_buffer.speech_started') {
+      isUserSpeaking = true;
+      if (currentResponseId) {
+        openaiWs.send(JSON.stringify({ type: 'response.cancel' }));
+        currentResponseId = null;
+      }
+      // Ask ElevenLabs to stop generation without closing WS
+      if (elevenLabsWs.readyState === WebSocket.OPEN) {
+        elevenLabsWs.send(JSON.stringify({ stop: true }));
+      }
+      return; // nothing else to process
+    }
+
+    //------ Caller has stopped talking -----------------------
+    if (msg.type === 'input_audio_buffer.speech_stopped') {
+      // small grace period before re‑enabling playback
+      setTimeout(() => { isUserSpeaking = false; }, 100);
+      return;
+    }
+
+    //------ Capture response ID for cancellation -------------
+    if (msg.type === 'response.created') {
+      currentResponseId = msg.response.id;
+      return;
+    }
+
+    //------ Stream text deltas  -> ElevenLabs ----------------
+    if (msg.type === 'response.text.delta' && msg.delta) {
+      if (elevenLabsWs.readyState === WebSocket.OPEN) {
+        elevenLabsWs.send(JSON.stringify({ text: msg.delta, flush: false }));
+      }
+      return;
+    }
+
+    //------ End of assistant turn ----------------------------
+    if (msg.type === 'response.done') {
+      currentResponseId = null;
+      if (elevenLabsWs.readyState === WebSocket.OPEN) {
+        // force flush so ElevenLabs starts speaking immediately
+        elevenLabsWs.send(JSON.stringify({ text: '', flush: true }));
+      }
+      return;
+    }
+
+    //------ Function call complete ---------------------------
+    if (msg.type === 'response.function_call_arguments.done' && msg.name === 'make_reservation') {
+      const args = JSON.parse(msg.arguments);
+      const result = await addReservation(args);
+
+      openaiWs.send(JSON.stringify({
+        type: 'conversation.item.create',
+        item: {
+          type: 'function_call_output',
+          call_id: msg.call_id,
+          output: JSON.stringify(result)
         }
-        
-        // Tuer ElevenLabs
-        if (elevenLabsWs) {
-          elevenLabsWs.terminate();
-          elevenLabsWs = null;
-        }
-        
-        // Reconnecter ElevenLabs après un court délai
-        setTimeout(() => {
-          connectElevenLabs();
-          isUserSpeaking = false;
-        }, 100);
-        
-        textBuffer = '';
-      }
-      
-      if (response.type === 'input_audio_buffer.speech_stopped') {
-        // Ne pas reset immédiatement, attendre que ElevenLabs soit reconnecté
-        console.log('Utilisateur a fini de parler');
-      }
-      
-      // Capturer l'ID de réponse pour pouvoir l'annuler
-      if (response.type === 'response.created') {
-        responseId = response.response.id;
-      }
-      
-      // Streaming du texte - toujours envoyer, OpenAI gère l'interruption
-      if (response.type === 'response.text.delta' && response.delta) {
-        textBuffer += response.delta;
-        
-        // Envoyer immédiatement par petits chunks
-        if (textBuffer.length > 10) {
-          if (elevenLabsWs && elevenLabsWs.readyState === WebSocket.OPEN) {
-            elevenLabsWs.send(JSON.stringify({
-              text: textBuffer,
-              flush: false
-            }));
-            textBuffer = '';
-          }
-        }
-      }
-      
-      // Fin de réponse
-      if (response.type === 'response.done') {
-        responseId = null;
-        if (textBuffer.trim() && elevenLabsWs && elevenLabsWs.readyState === WebSocket.OPEN) {
-          elevenLabsWs.send(JSON.stringify({
-            text: textBuffer,
-            flush: true
-          }));
-          textBuffer = '';
-        }
-      }
-      
-      if (response.type === 'response.function_call_arguments.done') {
-        console.log('Function call:', response.name, response.arguments);
-        
-        if (response.name === 'make_reservation') {
-          const args = JSON.parse(response.arguments);
-          const result = await addReservation(args);
-          
-          openaiWs.send(JSON.stringify({
-            type: 'conversation.item.create',
-            item: {
-              type: 'function_call_output',
-              call_id: response.call_id,
-              output: JSON.stringify(result)
-            }
-          }));
-          
-          openaiWs.send(JSON.stringify({
-            type: 'response.create'
-          }));
-        }
-      }
-      
-    } catch (error) {
-      console.error('Erreur OpenAI message:', error);
+      }));
+      openaiWs.send(JSON.stringify({ type: 'response.create' }));
     }
   });
 
-  ws.on('message', (message) => {
-    try {
-      const data = JSON.parse(message);
-      
-      if (data.event === 'start') {
-        console.log('Stream Twilio démarré');
-        ws.streamSid = data.start.streamSid;
-        ws.accountSid = data.start.accountSid;
-        ws.callSid = data.start.callSid;
-      }
-      
-      if (data.event === 'media') {
-        if (openaiWs.readyState === WebSocket.OPEN) {
-          openaiWs.send(JSON.stringify({
-            type: 'input_audio_buffer.append',
-            audio: data.media.payload
-          }));
-        }
-      }
-      
-      if (data.event === 'stop') {
-        console.log('Stream arrêté');
-        if (openaiWs.readyState === WebSocket.OPEN) {
-          openaiWs.close();
-        }
-        if (elevenLabsWs && elevenLabsWs.readyState === WebSocket.OPEN) {
-          elevenLabsWs.close();
-        }
-      }
-      
-    } catch (error) {
-      console.error('Erreur Twilio message:', error);
+  //----------------------------------------------------------
+  //  TWILIO MEDIA STREAM HANDLER
+  //----------------------------------------------------------
+  clientWs.on('message', (raw) => {
+    const pkt = JSON.parse(raw);
+
+    if (pkt.event === 'start') {
+      clientWs.streamSid = pkt.start.streamSid;
+      console.log('▶️  Twilio stream started', clientWs.streamSid);
     }
-  });
-  
-  ws.on('close', () => {
-    console.log('WebSocket Twilio fermé');
-    if (openaiWs.readyState === WebSocket.OPEN) {
-      openaiWs.close();
+
+    if (pkt.event === 'media') {
+      if (openaiWs.readyState === WebSocket.OPEN) {
+        openaiWs.send(JSON.stringify({
+          type: 'input_audio_buffer.append',
+          audio: pkt.media.payload
+        }));
+      }
     }
-    if (elevenLabsWs && elevenLabsWs.readyState === WebSocket.OPEN) {
-      elevenLabsWs.close();
+
+    if (pkt.event === 'stop') {
+      console.log('⛔️  Twilio stream stopped');
+      if (openaiWs.readyState === WebSocket.OPEN) openaiWs.close();
+      if (elevenLabsWs.readyState === WebSocket.OPEN) elevenLabsWs.close();
     }
   });
 
-  openaiWs.on('close', () => {
-    console.log('OpenAI WebSocket fermé');
+  //----------------------------------------------------------
+  //  CLEANUP
+  //----------------------------------------------------------
+  const safeClose = (ws) => {
+    if (ws && ws.readyState === WebSocket.OPEN) ws.close();
+  };
+
+  clientWs.on('close', () => {
+    console.log('🔌  Twilio WS closed');
+    safeClose(openaiWs);
+    safeClose(elevenLabsWs);
   });
 
-  openaiWs.on('error', (error) => {
-    console.error('Erreur OpenAI WebSocket:', error);
-  });
+  openaiWs.on('close', () => console.log('🔌  OpenAI WS closed'));
+  openaiWs.on('error', (e) => console.error('🛑  OpenAI WS error', e));
+  elevenLabsWs.on('error', (e) => console.error('🛑  ElevenLabs WS error', e));
 });
 
+//--------------------------------------------------------------
 server.listen(port, () => {
-  console.log(`Server started on port ${port}`);
-  console.log('WebSocket on port', port);
+  console.log(`🚀  Server listening on port ${port}`);
 });
