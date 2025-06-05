@@ -351,13 +351,13 @@ wss.on('connection', (ws, req) => {
       elevenLabsWs.send(JSON.stringify({
         text: " ",
         voice_settings: {
-          stability: 0.1,
+          stability: 0.2,
           similarity_boost: 1.0,
           style: 1.0,
           use_speaker_boost: true
         },
         generation_config: {
-          chunk_length_schedule: [30, 80, 120] // Chunks plus petits pour interruption plus rapide
+          chunk_length_schedule: [50, 120, 160, 250, 500] // Optimisé pour la réactivité
         }
       }));
     });
@@ -477,16 +477,13 @@ Remember: Wait for customer responses and don't rush the conversation.`,
         input_audio_transcription: {
           model: 'whisper-1'
         },
-        input_audio_noise_reduction: {
-          type: 'near_field'
-        },
         speed: 1.5,
         temperature: 1.2,
         turn_detection: {
           type: 'server_vad',
-          threshold: 0.4, // Plus sensible pour détecter rapidement
-          prefix_padding_ms: 400, // Réduit pour réaction plus rapide
-          silence_duration_ms: 300, // Réduit pour interruption plus rapide
+          threshold: 0.4, // Plus sensible
+          prefix_padding_ms: 150, // Réduit
+          silence_duration_ms: 150, // Augmenté pour laisser plus de temps
           create_response: true
         },
         tools: [
@@ -618,32 +615,18 @@ Remember: Wait for customer responses and don't rush the conversation.`,
       
       // Détecter quand l'utilisateur commence à parler
       if (response.type === 'input_audio_buffer.speech_started') {
-        console.log('Utilisateur commence à parler - INTERRUPTION');
+        console.log('Utilisateur commence à parler');
         isUserSpeaking = true;
         conversationStarted = true;
         
-        // INTERRUPTION IMMÉDIATE - Annuler toute génération en cours
-        if (isAssistantSpeaking) {
-          console.log('Interruption de l\'assistant');
-          
-          // 1. Vider le buffer texte
+        // Interrompre l'assistant si il parle
+        if (isAssistantSpeaking && elevenLabsWs && elevenLabsWs.readyState === WebSocket.OPEN) {
+          elevenLabsWs.send(JSON.stringify({
+            text: "",
+            flush: true
+          }));
           textBuffer = '';
           isAssistantSpeaking = false;
-          
-          // 2. Stopper ElevenLabs immédiatement
-          if (elevenLabsWs && elevenLabsWs.readyState === WebSocket.OPEN) {
-            elevenLabsWs.send(JSON.stringify({
-              text: "",
-              flush: true
-            }));
-          }
-          
-          // 3. Annuler la réponse OpenAI en cours
-          if (openaiWs.readyState === WebSocket.OPEN) {
-            openaiWs.send(JSON.stringify({
-              type: 'response.cancel'
-            }));
-          }
         }
       }
       
