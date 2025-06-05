@@ -351,9 +351,9 @@ wss.on('connection', (ws, req) => {
       elevenLabsWs.send(JSON.stringify({
         text: " ",
         voice_settings: {
-          stability: 0.4,
-          similarity_boost: 0.9,
-          style: 0.2,
+          stability: 0.1,
+          similarity_boost: 1.0,
+          style: 1.0,
           use_speaker_boost: true
         },
         generation_config: {
@@ -483,7 +483,7 @@ Remember: Wait for customer responses and don't rush the conversation.`,
           type: 'server_vad',
           threshold: 0.4, // Plus sensible
           prefix_padding_ms: 150, // Réduit
-          silence_duration_ms: 400, // Augmenté pour laisser plus de temps
+          silence_duration_ms: 150, // Augmenté pour laisser plus de temps
           create_response: true
         },
         tools: [
