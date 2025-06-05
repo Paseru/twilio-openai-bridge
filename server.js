@@ -116,7 +116,7 @@ wss.on('connection', (clientWs) => {
   //  OPENAI REALTIME WS
   //----------------------------------------------------------
   const openaiWs = new WebSocket(
-    'wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview',
+    'wss://api.openai.com/v1/realtime?model=gpt-4o-mini-realtime-preview',
     {
       headers: {
         'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`,
