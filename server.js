@@ -2,6 +2,8 @@ const express = require('express');
 const WebSocket = require('ws');
 const { GoogleSpreadsheet } = require('google-spreadsheet');
 const { JWT } = require('google-auth-library');
+const fs = require('fs');
+const path = require('path');
 const app = express();
 const port = process.env.PORT || 3000;
 
@@ -19,6 +21,72 @@ const serviceAccountAuth = new JWT({
 // Configuration ElevenLabs
 const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY;
 const ELEVENLABS_VOICE_ID = process.env.ELEVENLABS_VOICE_ID || 'EXAVITQu4vr4xnSDxMaL';
+
+// Configuration son d'ambiance
+const BACKGROUND_SOUND_PATH = process.env.BACKGROUND_SOUND_PATH || './restaurant-ambiance.raw';
+const BACKGROUND_VOLUME = parseFloat(process.env.BACKGROUND_VOLUME || '0.15');
+
+// Tables de conversion µ-law
+const ULAW_DECODE_TABLE = new Int16Array([
+  -32124, -31100, -30076, -29052, -28028, -27004, -25980, -24956,
+  -23932, -22908, -21884, -20860, -19836, -18812, -17788, -16764,
+  -15996, -15484, -14972, -14460, -13948, -13436, -12924, -12412,
+  -11900, -11388, -10876, -10364, -9852, -9340, -8828, -8316,
+  -7932, -7676, -7420, -7164, -6908, -6652, -6396, -6140,
+  -5884, -5628, -5372, -5116, -4860, -4604, -4348, -4092,
+  -3900, -3772, -3644, -3516, -3388, -3260, -3132, -3004,
+  -2876, -2748, -2620, -2492, -2364, -2236, -2108, -1980,
+  -1884, -1820, -1756, -1692, -1628, -1564, -1500, -1436,
+  -1372, -1308, -1244, -1180, -1116, -1052, -988, -924,
+  -876, -844, -812, -780, -748, -716, -684, -652,
+  -620, -588, -556, -524, -492, -460, -428, -396,
+  -372, -356, -340, -324, -308, -292, -276, -260,
+  -244, -228, -212, -196, -180, -164, -148, -132,
+  -120, -112, -104, -96, -88, -80, -72, -64,
+  -56, -48, -40, -32, -24, -16, -8, 0,
+  32124, 31100, 30076, 29052, 28028, 27004, 25980, 24956,
+  23932, 22908, 21884, 20860, 19836, 18812, 17788, 16764,
+  15996, 15484, 14972, 14460, 13948, 13436, 12924, 12412,
+  11900, 11388, 10876, 10364, 9852, 9340, 8828, 8316,
+  7932, 7676, 7420, 7164, 6908, 6652, 6396, 6140,
+  5884, 5628, 5372, 5116, 4860, 4604, 4348, 4092,
+  3900, 3772, 3644, 3516, 3388, 3260, 3132, 3004,
+  2876, 2748, 2620, 2492, 2364, 2236, 2108, 1980,
+  1884, 1820, 1756, 1692, 1628, 1564, 1500, 1436,
+  1372, 1308, 1244, 1180, 1116, 1052, 988, 924,
+  876, 844, 812, 780, 748, 716, 684, 652,
+  620, 588, 556, 524, 492, 460, 428, 396,
+  372, 356, 340, 324, 308, 292, 276, 260,
+  244, 228, 212, 196, 180, 164, 148, 132,
+  120, 112, 104, 96, 88, 80, 72, 64,
+  56, 48, 40, 32, 24, 16, 8, 0
+]);
+
+function ulaw2linear(ulawValue) {
+  return ULAW_DECODE_TABLE[ulawValue & 0xFF];
+}
+
+function linear2ulaw(linearValue) {
+  const BIAS = 0x84;
+  const MAX = 32635;
+  let sign = 0;
+  
+  if (linearValue < 0) {
+    sign = 0x80;
+    linearValue = -linearValue;
+  }
+  
+  if (linearValue > MAX) linearValue = MAX;
+  linearValue += BIAS;
+  
+  let exponent = 7;
+  for (let expMask = 0x4000; (linearValue & expMask) === 0; exponent--, expMask >>= 1) {}
+  
+  const mantissa = (linearValue >> (exponent + 3)) & 0x0F;
+  const ulawByte = ~(sign | (exponent << 4) | mantissa) & 0xFF;
+  
+  return ulawByte;
+}
 
 // Fonction pour ajouter une réservation
 async function addReservation(reservationData) {
@@ -229,6 +297,67 @@ wss.on('connection', (ws, req) => {
   let audioQueue = [];
   let isPlaying = false;
   
+  // Variables pour le backchanneling
+  let lastUserSpeechTime = Date.now();
+  let backchannelTimeout = null;
+  let isUserSpeaking = false;
+  let conversationStarted = false;
+  
+  // Variables pour le son d'ambiance
+  let backgroundSoundBuffer = null;
+  let backgroundSoundPosition = 0;
+  let isSendingBackground = false;
+  let backgroundInterval = null;
+  
+  // Charger le fichier audio d'ambiance
+  function loadBackgroundSound() {
+    try {
+      if (fs.existsSync(BACKGROUND_SOUND_PATH)) {
+        backgroundSoundBuffer = fs.readFileSync(BACKGROUND_SOUND_PATH);
+        console.log('Son d\'ambiance chargé:', backgroundSoundBuffer.length, 'bytes');
+        return true;
+      } else {
+        console.log('Fichier son d\'ambiance non trouvé:', BACKGROUND_SOUND_PATH);
+        return false;
+      }
+    } catch (error) {
+      console.error('Erreur chargement son ambiance:', error);
+      return false;
+    }
+  }
+  
+  // Fonction pour envoyer du backchanneling
+  function sendBackchannel() {
+    const backchannelPhrases = [
+      "Mhm",
+      "Yeah",
+      "I see",
+      "Uh-huh",
+      "Okay",
+      "Got it",
+      "Sure",
+      "Right",
+      "Of course",
+      "I understand",
+      "Absolutely"
+    ];
+    
+    const phrase = backchannelPhrases[Math.floor(Math.random() * backchannelPhrases.length)];
+    
+    if (elevenLabsWs && elevenLabsWs.readyState === WebSocket.OPEN) {
+      elevenLabsWs.send(JSON.stringify({
+        text: phrase,
+        voice_settings: {
+          stability: 0.7,
+          similarity_boost: 0.8,
+          style: 0.0,
+          use_speaker_boost: true
+        },
+        flush: true
+      }));
+    }
+  }
+  
   // Fonction pour créer une connexion ElevenLabs WebSocket
   function connectElevenLabs() {
     elevenLabsWs = new WebSocket('wss://api.elevenlabs.io/v1/text-to-speech/' + ELEVENLABS_VOICE_ID + '/stream-input?model_id=eleven_flash_v2&output_format=ulaw_8000', {
@@ -259,6 +388,9 @@ wss.on('connection', (ws, req) => {
       const response = JSON.parse(data);
       
       if (response.audio) {
+        // Arrêter temporairement le son d'ambiance pendant que la voix parle
+        isSendingBackground = false;
+        
         // Envoyer directement à Twilio (déjà en ulaw)
         ws.send(JSON.stringify({
           event: 'media',
@@ -267,6 +399,11 @@ wss.on('connection', (ws, req) => {
             payload: response.audio
           }
         }));
+        
+        // Reprendre le son d'ambiance après un délai
+        setTimeout(() => {
+          isSendingBackground = true;
+        }, 100);
       }
     });
     
@@ -293,6 +430,42 @@ wss.on('connection', (ws, req) => {
     // Créer la connexion ElevenLabs
     connectElevenLabs();
     
+    // Démarrer le son d'ambiance
+    if (loadBackgroundSound()) {
+      console.log('Son d\'ambiance activé');
+      isSendingBackground = true;
+      
+      // Envoyer le son d'ambiance toutes les 20ms
+      backgroundInterval = setInterval(() => {
+        if (isSendingBackground && ws.readyState === WebSocket.OPEN && backgroundSoundBuffer) {
+          const chunkSize = 160;
+          const chunk = Buffer.alloc(chunkSize);
+          
+          for (let i = 0; i < chunkSize; i++) {
+            chunk[i] = backgroundSoundBuffer[(backgroundSoundPosition + i) % backgroundSoundBuffer.length];
+          }
+          
+          backgroundSoundPosition = (backgroundSoundPosition + chunkSize) % backgroundSoundBuffer.length;
+          
+          // Ajuster le volume
+          const adjustedChunk = Buffer.alloc(chunkSize);
+          for (let i = 0; i < chunkSize; i++) {
+            const sample = ulaw2linear(chunk[i]);
+            const adjusted = Math.round(sample * BACKGROUND_VOLUME);
+            adjustedChunk[i] = linear2ulaw(adjusted);
+          }
+          
+          ws.send(JSON.stringify({
+            event: 'media',
+            streamSid: ws.streamSid,
+            media: {
+              payload: adjustedChunk.toString('base64')
+            }
+          }));
+        }
+      }, 20);
+    }
+    
     // Configuration de la session avec contexte du numéro appelant
     openaiWs.send(JSON.stringify({
       type: 'session.update',
@@ -301,6 +474,12 @@ wss.on('connection', (ws, req) => {
         instructions: `You are the front desk assistant at Casa Masa restaurant. Be warm, natural, and conversational.
 
 CONTEXT: The caller's phone number is ${callerPhone || 'unknown'}.
+
+CONVERSATIONAL STYLE:
+- Keep responses concise and natural
+- Don't over-explain or be too verbose
+- Use natural pauses and allow for back-and-forth conversation
+- Your responses should be brief enough to allow natural dialogue flow
 
 MAIN FLOW:
 1. First, understand what the caller wants:
@@ -324,12 +503,13 @@ MAIN FLOW:
 
 IMPORTANT:
 - Always be conversational and natural
+- Keep responses SHORT to allow for natural back-and-forth
 - Confirm changes before making them
 - After any successful action, summarize what was done
 - End calls politely with end_call function
 - If someone seems confused, gently guide them
 
-Remember: You're a friendly restaurant host, not a robot!`,
+Remember: You're a friendly restaurant host having a natural conversation, not reading from a script!`,
         input_audio_format: 'g711_ulaw',
         input_audio_transcription: {
           model: 'whisper-1'
@@ -338,7 +518,8 @@ Remember: You're a friendly restaurant host, not a robot!`,
           type: 'server_vad',
           threshold: 0.5,
           prefix_padding_ms: 100,
-          silence_duration_ms: 300
+          silence_duration_ms: 300,
+          create_response: true
         },
         tools: [
           {
@@ -465,9 +646,55 @@ Remember: You're a friendly restaurant host, not a robot!`,
     try {
       const response = JSON.parse(data);
       
+      // Détecter quand l'utilisateur commence à parler
+      if (response.type === 'input_audio_buffer.speech_started') {
+        console.log('Utilisateur commence à parler');
+        isUserSpeaking = true;
+        conversationStarted = true;
+        
+        // Annuler tout backchanneling en cours
+        if (backchannelTimeout) {
+          clearTimeout(backchannelTimeout);
+          backchannelTimeout = null;
+        }
+      }
+      
+      // Détecter quand l'utilisateur arrête de parler
+      if (response.type === 'input_audio_buffer.speech_stopped') {
+        console.log('Utilisateur arrête de parler');
+        isUserSpeaking = false;
+        lastUserSpeechTime = Date.now();
+      }
+      
+      // Détecter la transcription en temps réel
+      if (response.type === 'conversation.item.input_audio_transcription.completed') {
+        const transcript = response.transcript;
+        console.log('Transcription:', transcript);
+        
+        // Si l'utilisateur parle depuis plus de 3 secondes, programmer un backchanneling
+        if (transcript && transcript.split(' ').length > 10 && conversationStarted) {
+          const delay = 1000 + Math.random() * 1000;
+          
+          if (!backchannelTimeout && isUserSpeaking) {
+            backchannelTimeout = setTimeout(() => {
+              if (isUserSpeaking) {
+                sendBackchannel();
+                backchannelTimeout = null;
+              }
+            }, delay);
+          }
+        }
+      }
+      
       // Capturer le texte en streaming
       if (response.type === 'response.text.delta' && response.delta) {
         textBuffer += response.delta;
+        
+        // L'assistant est en train de parler, pas de backchanneling
+        if (backchannelTimeout) {
+          clearTimeout(backchannelTimeout);
+          backchannelTimeout = null;
+        }
         
         // Envoyer à ElevenLabs par chunks
         const chunks = textBuffer.match(/.{1,50}[.!?,\s]|.{1,50}$/g) || [];
@@ -603,6 +830,10 @@ Remember: You're a friendly restaurant host, not a robot!`,
     }
     if (elevenLabsWs && elevenLabsWs.readyState === WebSocket.OPEN) {
       elevenLabsWs.close();
+    }
+    if (backgroundInterval) {
+      clearInterval(backgroundInterval);
+      backgroundInterval = null;
     }
   });
 
