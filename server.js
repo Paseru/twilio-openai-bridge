@@ -319,6 +319,10 @@ wss.on('connection', (ws, req) => {
   let isSendingBackground = false;
   let backgroundInterval = null;
   
+  // Variables pour gérer l'interruption
+  let currentResponseId = null;
+  let isGeneratingResponse = false;
+  
   // Charger le fichier audio d'ambiance
   function loadBackgroundSound() {
     try {
@@ -454,23 +458,23 @@ wss.on('connection', (ws, req) => {
         instructions: `You are Maria, the friendly front desk assistant at Casa Masa restaurant. 
 
 IMPORTANT CONVERSATION FLOW:
-1. After greeting, WAIT for the customer to speak before saying anything else
-2. When taking a reservation, after confirming details, ALWAYS ask: "Is there anything else I can help you with today?"
-3. Only end the call when the customer says goodbye or indicates they're done
-4. Keep responses concise and natural - avoid being too chatty
-5. Don't repeat information unnecessarily
+After greeting, WAIT for the customer to speak before saying anything else,
+When taking a reservation, after confirming details, ALWAYS ask: "Is there anything else I can help you with today?",
+Only end the call when the customer says goodbye or indicates they're done,
+Keep responses concise and natural - avoid being too chatty,
+Don't repeat information unnecessarily,
 
 PERSONALITY:
-- Warm, professional, and conversational
-- Use natural speech patterns with occasional "um", "let's see", etc.
-- Be patient and helpful
-- Speak at a comfortable pace
+Warm, professional, and conversational,
+Use natural speech patterns with occasional "um", "let's see", etc.,
+Be patient and helpful,
+Speak at a comfortable pace,
 
 RESERVATION PROCESS:
-- Get date, time, number of guests, and name
-- Confirm all details before booking
-- After successful booking, ask if they need anything else
-- Be helpful with modifications or questions
+Get date, time, number of guests, and name,
+Confirm all details before booking,
+After successful booking, ask if they need anything else,
+Be helpful with modifications or questions,
 
 Remember: Wait for customer responses and don't rush the conversation.`,
         input_audio_format: 'g711_ulaw',
@@ -615,18 +619,31 @@ Remember: Wait for customer responses and don't rush the conversation.`,
       
       // Détecter quand l'utilisateur commence à parler
       if (response.type === 'input_audio_buffer.speech_started') {
-        console.log('Utilisateur commence à parler');
+        console.log('Utilisateur commence à parler - INTERRUPTION!');
         isUserSpeaking = true;
         conversationStarted = true;
         
-        // Interrompre l'assistant si il parle
-        if (isAssistantSpeaking && elevenLabsWs && elevenLabsWs.readyState === WebSocket.OPEN) {
-          elevenLabsWs.send(JSON.stringify({
-            text: "",
-            flush: true
+        // INTERRUPTION IMMÉDIATE - Annuler la génération en cours
+        if (isGeneratingResponse && currentResponseId) {
+          console.log('Annulation de la réponse en cours:', currentResponseId);
+          openaiWs.send(JSON.stringify({
+            type: 'response.cancel',
+            response_id: currentResponseId
           }));
-          textBuffer = '';
-          isAssistantSpeaking = false;
+        }
+        
+        // Vider le buffer de texte
+        textBuffer = '';
+        isAssistantSpeaking = false;
+        isGeneratingResponse = false;
+        
+        // Arrêter ElevenLabs immédiatement
+        if (elevenLabsWs && elevenLabsWs.readyState === WebSocket.OPEN) {
+          // Fermer et recréer la connexion pour un arrêt net
+          elevenLabsWs.close();
+          setTimeout(() => {
+            connectElevenLabs();
+          }, 100);
         }
       }
       
@@ -643,8 +660,21 @@ Remember: Wait for customer responses and don't rush the conversation.`,
         console.log('Transcription:', transcript);
       }
       
+      // Détecter le début d'une nouvelle réponse
+      if (response.type === 'response.created') {
+        currentResponseId = response.response.id;
+        isGeneratingResponse = true;
+        console.log('Nouvelle réponse créée:', currentResponseId);
+      }
+      
       // Capturer le texte en streaming - optimisé
       if (response.type === 'response.text.delta' && response.delta) {
+        // Ne pas traiter si l'utilisateur parle
+        if (isUserSpeaking) {
+          console.log('Texte ignoré car l\'utilisateur parle');
+          return;
+        }
+        
         textBuffer += response.delta;
         isAssistantSpeaking = true;
         
@@ -655,7 +685,7 @@ Remember: Wait for customer responses and don't rush the conversation.`,
           const chunkToSend = chunks[0];
           textBuffer = textBuffer.substring(chunkToSend.length);
           
-          if (elevenLabsWs && elevenLabsWs.readyState === WebSocket.OPEN) {
+          if (elevenLabsWs && elevenLabsWs.readyState === WebSocket.OPEN && !isUserSpeaking) {
             elevenLabsWs.send(JSON.stringify({
               text: chunkToSend,
               flush: false
@@ -666,13 +696,28 @@ Remember: Wait for customer responses and don't rush the conversation.`,
       
       // Fin de la réponse - envoyer le reste
       if (response.type === 'response.done') {
-        if (textBuffer.trim() && elevenLabsWs && elevenLabsWs.readyState === WebSocket.OPEN) {
+        isGeneratingResponse = false;
+        currentResponseId = null;
+        
+        // Ne pas envoyer si l'utilisateur parle
+        if (!isUserSpeaking && textBuffer.trim() && elevenLabsWs && elevenLabsWs.readyState === WebSocket.OPEN) {
           elevenLabsWs.send(JSON.stringify({
             text: textBuffer,
             flush: true
           }));
           textBuffer = '';
+        } else {
+          textBuffer = ''; // Vider dans tous les cas
         }
+        isAssistantSpeaking = false;
+      }
+      
+      // Réponse annulée
+      if (response.type === 'response.cancelled') {
+        console.log('Réponse annulée avec succès');
+        isGeneratingResponse = false;
+        currentResponseId = null;
+        textBuffer = '';
         isAssistantSpeaking = false;
       }
       
